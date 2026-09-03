@@ -27,7 +27,7 @@ func paramDescMsg(oids ...uint32) []byte {
 	for _, o := range oids {
 		p = append(p, u32(o)...)
 	}
-		return msg(msgParamDesc, p)
+	return msg(msgParamDesc, p)
 }
 
 // rowDescMsg builds a minimal backend RowDescription ('T').

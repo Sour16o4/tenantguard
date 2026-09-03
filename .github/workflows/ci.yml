@@ -72,7 +72,7 @@ jobs:
         # Postgres actually being down — a false negative worse than no check
         # at all.
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null; then
               exec 3<&- 3>&-
               exit 0
@@ -108,7 +108,7 @@ jobs:
         # .github/workflows/ — proven locally (via act, on a checkout with no
         # git history) to fail with "no project was found" when that walk
         # comes up empty, even though the workflow itself is fine.
-        run: "$(go env GOPATH)/bin/actionlint .github/workflows/ci.yml"
+        run: '"$(go env GOPATH)/bin/actionlint" .github/workflows/ci.yml'
       - name: parse workflow YAML (belt-and-braces syntax/structure check)
         # PyYAML is not preinstalled on every runner image, and the runner's
         # system Python is PEP 668 "externally managed" and refuses a plain

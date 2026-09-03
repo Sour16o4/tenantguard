@@ -938,6 +938,19 @@ original one.**
   failing the job like any other), but the setting itself is unconfigured and
   unverified.
 
+  **This `[R]` tag got its first real measurement, not a resolution, when
+  this repository's first actual GitHub push ran the pipeline for real —
+  see §7.7 (`TGD-BL-44`).** Two real findings surfaced there that no local
+  or `act`-based session had caught (a `gofmt` defect, and two real
+  `shellcheck`-via-`actionlint` findings), both root-caused and fixed. The
+  root cause was a locally-absent `shellcheck` binary silently degrading
+  `actionlint`'s own checks, not a confirmed `act`-vs-hosted-image
+  behavioral difference — so this `[R]` tag stays open, narrowed rather
+  than closed: local verification of this pipeline is now known to have
+  been insufficient at least once, and the pipeline's third job (the real
+  test/mutation-harness run, with a real Postgres service container) has
+  still never completed on GitHub's own infrastructure.
+
 ---
 
 ### Epic E-7 — Tier 2 Guardrail
@@ -1933,6 +1946,92 @@ Tier 1's ceiling is measured against.
 **No new defect shape found while proving this fix** (the CTE
 false-positive was found and fixed within the same change, not left for a
 future session) — nothing further filed.
+
+### 7.7 `TGD-BL-44` — CI's first real GitHub run failed on two findings local
+tooling never surfaced; the `[R]` gap between `act`'s image and GitHub's
+hosted runner is now a measured divergence, not an open question
+
+**What happened.** The first push to GitHub failed two of the three CI
+jobs. `build/vet/gofmt`: `gofmt would reformat: internal/capture/backend_test.go`
+— a real, one-line indentation defect (`return` mis-indented inside
+`paramDescMsg`), present since the file was written, never caught locally
+because prior sessions' own `gofmt -l` runs and this session's re-runs were
+treated as authoritative without querying CI's actual gate. **Fixed:**
+`gofmt -w` applied; `gofmt -l .` now reports nothing repository-wide.
+
+`workflow-lint`: `actionlint` (via its `shellcheck` integration) reported
+two real `shellcheck` findings in `.github/workflows/ci.yml` — `SC2034`
+("`i` appears unused") on the postgres-wait loop's `for i in $(seq 1 30)`
+(`i` is never read in the loop body — fixed to `for _ in ...`), and
+`SC2046` ("quote this to prevent word splitting") on the actionlint
+invocation itself, `run: "$(go env GOPATH)/bin/actionlint .github/workflows/ci.yml"`
+— the whole line was inside one pair of double quotes, so `$(go env GOPATH)`
+was still subject to word-splitting/globbing as an unquoted expansion once
+YAML parsed the scalar; fixed to quote only the substitution's own span:
+`run: '"$(go env GOPATH)/bin/actionlint" .github/workflows/ci.yml'` (the
+outer single quotes are YAML's, the inner double quotes are the shell's).
+
+**Why local runs never caught either.** `gofmt`: earlier sessions'
+`gofmt -l` output was treated as an established baseline ("clean except
+this one file") without re-querying it fresh each session — a manual
+exemption a real gate does not honour, exactly the "gate routed around by
+hand" shape this project exists to catch, now caught in its own tooling.
+
+`actionlint`/`shellcheck`, root-caused directly from `actionlint`
+v1.7.12's own source (`linter.go`, around its rule-construction list):
+`NewRuleShellcheck` is only invoked if a `shellcheck` executable resolves
+on `$PATH`; if it does not, the shellcheck-backed rule is silently
+dropped — logged only through `actionlint`'s internal debug logger (which
+nothing in this project's invocation enables), not surfaced as a warning,
+and does not affect the exit code. **`shellcheck` was never installed in
+any prior local or `act`-based verification session for this project** —
+confirmed by grepping both `docs/SRS.md` and the design doc for the string
+`shellcheck`: zero hits anywhere, versus repeated, explicit mentions of
+installing `actionlint` and `act` themselves. **Reproduced directly, same
+binary, same file, this session:** `actionlint` run against the
+pre-fix `.github/workflows/ci.yml` with `shellcheck` absent from `$PATH`
+exits 0, no output; the identical invocation with a freshly downloaded
+`shellcheck` v0.11.0 placed on `$PATH` exits 1, printing the exact two
+findings GitHub reported, byte-for-byte matching line numbers and rule
+IDs. This is not `act` vs. GitHub's hosted image diverging — it is a
+locally-absent dependency the tool silently degrades around, on both the
+bare-host and (as far as this project's own docs record) the `act` path
+alike.
+
+**What this means for §11's standing `[R]` tag** ("whether GitHub's actual
+hosted `ubuntu-latest` behaves identically to `act`'s image... is `[R]`"):
+this run is the first actual measurement, and it found a real, reproduced
+divergence between local verification and GitHub's runner — but the cause
+is confirmed to be the absent `shellcheck` binary locally, not an
+`act`-vs-hosted-image behavioral difference as such. The `[R]` tag is
+**not resolved** by this finding: whether `act`'s image and GitHub's
+hosted image would still agree if both had `shellcheck` present is still
+unmeasured. What is now known, not merely asserted: local-only
+verification of this pipeline was insufficient on its own, independent of
+that open question, and a real GitHub run is required to trust this gate
+— exactly the position `TGD-US-11` AC-6's own closure note already took
+about branch protection, extended here to cover CI itself.
+
+**Re-verified after both fixes**, `shellcheck` present on `$PATH` for the
+first time in this project's history: `actionlint .github/workflows/ci.yml`
+exits 0; `scripts/check_workflow_yaml.py` still parses the file
+structurally sane; `bash -n` on both hand-written shell scripts clean.
+Full repository suite (`go test -p 1 -count=1 ./...` with `TGD_TEST_DSN`
+set against a real Postgres) green across all 7 packages, fresh (test
+cache cleared first, not relying on a cached prior pass); `go vet`/`gofmt -l`
+clean repository-wide; `TestMutationHarnessM1ThroughM8` still 8/8;
+`TestCorpus_ExactSetEquality`/`TestCorpus_Tier2ExactSetEquality` still
+exact, unchanged from §7.6 (24/24 and 20/23 respectively) — this fix
+touched only formatting and CI YAML, no Go logic.
+
+**Not yet proven:** the third CI job (`test`/`-race`/coverage floor/the
+`M1`–`M8` mutation harness) skipped on the first run because GitHub Actions
+`needs:` held it back when the first two jobs failed — it has not yet run
+on GitHub's own infrastructure at all. Whether the real Postgres service
+container and `scripts/assert_tests_ran.py` behave identically on GitHub's
+hosted runner as they do under `act`/locally remains open until that job
+actually runs and is observed, which requires these two fixes to land
+first.
 
 ## 8. External Interfaces
 

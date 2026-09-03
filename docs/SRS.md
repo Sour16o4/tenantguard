@@ -783,6 +783,17 @@ and is consistently filtered **[R]**.
   *When* inference runs,
   *Then* it completes without crashing and reports what it could not classify.
   Gated by `TGD-BL-07`; **[U]** — no accuracy target until measured.
+  **Formally descoped from M2, not silently left dangling:** `zitadel` is a
+  third-target integration effort — the design's own validation-targets
+  table (§10) already calls it out as "valuable *because* it is the hard
+  case; third target, not first." `M4` already carries `zitadel`-specific
+  work as its own named exit-criterion gap (`TGD-BL-09`, session-handling
+  inspection). Splitting `zitadel` integration work across both M2 and M4
+  duplicates the same third-target burden under two different milestones
+  for no reason tied to either milestone's own definition — `M2`'s name is
+  "Tier 1 usable," already proven on `coder` (§7.3, 37 real `LEAK`
+  verdicts), not "Tier 1 usable against every target." This AC moves to
+  `M4`, alongside `TGD-BL-09`, where `zitadel`-specific work already lives.
 
 ---
 
@@ -808,6 +819,18 @@ report becomes a fix rather than an argument.
   reached from" is **not implemented and not claimed** — capture records only a
   connection id, with no provenance back to a test name or call site. Tracked as
   `TGD-BL-26`, deliberately left open rather than faked.
+  **This remaining clause is formally descoped from M2, not silently left
+  dangling:** it is a findings-report triage enhancement (letting a `LEAK`
+  be traced to the test or call site that produced it) — valuable, named
+  explicitly by `TGD-BL-32`'s own real-`coder`-run notes as what would let
+  a `LEAK` be triaged without manual SQL inspection, but not required to
+  demonstrate that Tier 1 itself produces real, actionable findings, which
+  §7.3 already has (37 real `LEAK` verdicts, inspected directly by hand
+  this project's own way, without this feature). It is a capture-layer
+  change (threading provenance from `tenantguard capture` through to the
+  report), cross-cutting all tiers rather than specific to any one
+  milestone's own theme — it moves to `M5` (v1.0.0 hardening), where "every
+  `[U]`/open item either resolved or explicitly withdrawn" already governs.
 
 - **AC-2** **[E]** *Given* `--output json`, *When* the command completes, *Then* stdout
   contains a single valid JSON document conforming to the published schema, and all
@@ -926,30 +949,40 @@ original one.**
   because CI runners are ephemeral). None of these would have been caught by
   writing the YAML carefully and trusting it — only by running it.
 
-  **What is still asserted, not executed, and stated as such:** whether
-  GitHub's *actual* hosted `ubuntu-latest` behaves identically to `act`'s
-  `catthehacker/ubuntu:act-latest` image in every respect is `[R]` — `act` is
-  a well-regarded, widely used local runner, but it is not GitHub's own
-  infrastructure. Marking this job as a **required status check** in branch
-  protection — the actual mechanism that makes a check "merge-blocking" in
-  GitHub's own sense — is a repository setting requiring push access and
-  cannot be configured or verified from here; the workflow is *structured* to
-  support that (three independent jobs, `needs:` dependency, a non-zero exit
-  failing the job like any other), but the setting itself is unconfigured and
-  unverified.
+  **`[R]` resolved to `[E]`: GitHub's hosted runner has now actually run
+  this workflow, all three jobs, and gone fully green.** This repository's
+  first push (`ac01136`) surfaced two real local-vs-hosted divergences,
+  fixed in commit `fdccf50` (`TGD-BL-44`, §7.7) — a genuine `gofmt` defect
+  and two genuine `shellcheck`-via-`actionlint` findings, neither caught by
+  any prior local or `act`-based session because `shellcheck` had never
+  been installed in any of them. The next push, same commit `fdccf50`, ran
+  as GitHub Actions run `33716947618` (`https://github.com/Sour16o4/tenantguard/actions/runs/33716947618`,
+  2026-09-03) and **all three jobs succeeded**, confirmed from the run's
+  own job metadata: `build, vet, gofmt`, `lint this workflow file`, and —
+  for the first time — `test (-race), coverage floor, M1-M8 mutation
+  harness`, on GitHub's real hosted infrastructure with a real Postgres
+  service container, not `act`'s local Docker. That third job's own
+  output, `scripts/assert_tests_ran.py`: **298 tests passed, 0 skipped,
+  all 8 mutation-harness subtests confirmed present** — the exact
+  by-name check this AC's own mechanism requires (the script only reaches
+  that summary line after individually matching all eight `M1`–`M8`
+  substrings against passed tests; it enumerates them by name only on the
+  failure path) — and coverage 70.0%, above the 60% floor. This closes the
+  gap this AC's evidence previously stated plainly: GitHub itself has now
+  run this workflow, and it passed, not merely `act`'s local approximation
+  of it.
 
-  **This `[R]` tag got its first real measurement, not a resolution, when
-  this repository's first actual GitHub push ran the pipeline for real —
-  see §7.7 (`TGD-BL-44`).** Two real findings surfaced there that no local
-  or `act`-based session had caught (a `gofmt` defect, and two real
-  `shellcheck`-via-`actionlint` findings), both root-caused and fixed. The
-  root cause was a locally-absent `shellcheck` binary silently degrading
-  `actionlint`'s own checks, not a confirmed `act`-vs-hosted-image
-  behavioral difference — so this `[R]` tag stays open, narrowed rather
-  than closed: local verification of this pipeline is now known to have
-  been insufficient at least once, and the pipeline's third job (the real
-  test/mutation-harness run, with a real Postgres service container) has
-  still never completed on GitHub's own infrastructure.
+  **What remains explicitly `[R]`, not folded into this closure:** the
+  branch-protection **required status check** setting — the literal
+  GitHub mechanism that makes a green run merge-blocking rather than
+  merely informative — is a repository administration setting requiring
+  push access, and remains **unconfigured**. The workflow is *structured*
+  to support it (three independent jobs, a `needs:` dependency, a
+  non-zero exit failing the job like any other) and has now been proven
+  to actually run and pass on GitHub's own infrastructure, but nothing yet
+  stops a pull request from merging while this pipeline is red — that is
+  a distinct, still-open gap, not resolved by a workflow file existing and
+  passing.
 
 ---
 
@@ -1019,7 +1052,7 @@ Gate 0) are the only rows carrying numbers that were actually run.
 | ID | Requirement | Target | Verification | Status |
 |----|-------------|--------|--------------|--------|
 | `TGD-NFR-01` | Tier 0 time from clone to ranked output | < 5 min | Timed test | **[E]** Measured, §7.4: `19.5s` clone-to-output against a fresh `coder/coder` clone (`git clone --depth 1` + `tenantguard triage`), dominated entirely by the clone itself — the scan phase alone is `~2.5s` against `coder`'s ~2,800 scanned files. |
-| `TGD-NFR-02` | Tier 1 time to first finding on an unfamiliar repository | **UNBASELINED** | Timed test | **[U]** — the 90-minute figure in the design was built on the wrong bottleneck (policy review, not seeding) and is **withdrawn**. Re-baselined only after `TGD-BL-10` (probe seeding) lands. No number is in force. |
+| `TGD-NFR-02` | Tier 1 time to first finding on an unfamiliar repository | **PARTIALLY BASELINED** | Timed test | **[E]** for the tool-mechanical setup phases only: `infer` + `verify` together measured at **under 1 second** (0.059s + 0.889s) against a real 132-relation/22-scoped-table schema, §7.9. **[U]** for the full metric — human policy-review time and the live-capture-to-first-`LEAK` phase remain unmeasured; the 90-minute design figure stays **withdrawn**. §7.9 records the measurement protocol a fair full baseline requires (`TGD-BL-45`, a genuinely unfamiliar target, filed). No single number is in force for the full metric. |
 | `TGD-NFR-03` | Unattributable rate ceiling | **Stored value: `122.0/378.0` (≈32.28%)**, against the `row_level_touching_real_app_sql` denominator (`TGD-BL-33`), corrected by `TGD-BL-39` to exclude vacuous `SAFE`s (§9.7), measured on a differ with `TGD-BL-42` fixed (§7.3) — the third baseline set, and the first RAISE. | Integration test | **[E]** Enforced and re-provable. History: `130/611` (`TGD-BL-06`) → `131/664` (`TGD-BL-38`, down) → **`122/378`** (`TGD-BL-42`, up — §7.3 in full, and `ceiling.go`'s own comment, for why the raise does not violate `TGD-US-07` AC-2's down-only ratchet: every prior number was measured by a differ later found to silently discard real tenant values on cast `INSERT` parameters, `$N::type` — `sqlc`'s default codegen shape — so those were never a trustworthy floor). §7.1/§7.2 (superseded) record the intermediate, contaminated measurements (`25.24%`/`131/519`, then `31.41%`/`468/147`) for provenance; neither was ever set as the stored constant. A real `audit` run against the exact capture and binary this baseline was measured on exits 0. |
 | `TGD-NFR-04` | **`Bind` resolution rate** — a captured `Bind` is matched to the SQL of an open statement on its own connection | 100% | Protocol test + real-suite run | **[E]** `TGD-BL-11`: **1,314/1,314** across 163 connections of `coder`'s `dbpurge` suite, plus 2,266 simple-protocol queries. **[E]** ported implementation: 821/821 against live `pgx` and `lib/pq`. **Scope caveat:** `coder` exercises **no statement caching** (Parse:Bind 1:1) and **only unnamed statements**, so the eviction and named-statement paths rest on synthetic evidence alone. |
 | `TGD-NFR-17` | **Parameter value recovery rate** — a captured parameter is readable as a *value*, not merely as bytes | Report; threshold deferred | Protocol test + real-driver run | **[E] before backend capture:** 861/961 (89.6%) known — all text; **100/961 (10.4%) binary and undecodable**. **[E] after backend capture (`TGD-BL-14`):** **961/961 (100%)** — the same workload set, all 100 binary parameters decoded from `ParameterDescription` OIDs. **Distinct from `TGD-NFR-04`; never report the two as one figure.** `coder`'s 1,314 remain **[R]** for this metric: the spike recorded no format codes, so **that run's text/binary breakdown is unrecoverable**. **Residual, unmeasured:** the decoder covers a fixed type set; `zitadel` is untested and may bind types with no decoder (`numeric`, `jsonb`, arrays), which stay undecodable by design. **[E] `Describe` FIFO correlation, validated against a real driver:** `pgx`'s `QueryExecModeDescribeExec` (never caches, always describes explicitly) was run through the built binary against real PostgreSQL with two distinct queries back to back; both `ParameterDescription` replies were attributed to the correct statement, with no cross-contamination. Previously this logic was proven only by synthetic mutation tests — an earlier attempt with `QueryExecModeExec` sent parameters as text and never triggered `Describe` at all, which was reported rather than left implied. **A real bug surfaced by this run**: a successfully decoded binary parameter carried a stale `unknown_reason` alongside `value_known:true` — `parseBind`'s placeholder reason was never cleared on successful decode. Fixed, red/green proven, mutation-caught. **Still unproven:** only one `Describe`/`Bind` ordering has been exercised live; out-of-order or interleaved pipelining remains validated by the synthetic tests alone (`[R]`). |
@@ -1028,7 +1061,7 @@ Gate 0) are the only rows carrying numbers that were actually run.
 | `TGD-NFR-07` | Writes to the target application's database | **Zero** | Row-count diff test | Absolute (§3.3) |
 | `TGD-NFR-08` | A findings report is emitted only when all four oracle self-checks passed | **Absolute** | Mutation harness | Absolute |
 | `TGD-NFR-09` | Fixture corpus exact-set equality, per tier, across all three verdict classes | **Absolute** | Corpus test | Absolute |
-| `TGD-NFR-10` | Every mutant `M1`–`M8` caught by its **mapped** gate | **Absolute** | Mutation harness | **[E]** all 8 pass against real PostgreSQL. `M3`/`M7` corrected from `A1` to `A4` during this run — see design §8 — and `M8` added to confirm `A1` retains independent coverage `A4` does not subsume. |
+| `TGD-NFR-10` | Every mutant `M1`–`M8` caught by its **mapped** gate | **Absolute** | Mutation harness | **[E]** all 8 pass against real PostgreSQL. `M3`/`M7` corrected from `A1` to `A4` during this run — see design §8 — and `M8` added to confirm `A1` retains independent coverage `A4` does not subsume. Previously proven only locally/under `act`; now also confirmed on GitHub's own hosted runner, by name, in GitHub Actions run `33716947618` (commit `fdccf50`) — see `TGD-US-11` AC-6 and §7.7 (`TGD-BL-44`). |
 | `TGD-NFR-11` | Probe database dropped on every exit path including panic and `SIGINT` | **Absolute** | Integration test | Absolute |
 | `TGD-NFR-12` | Behaviour against a TLS-requiring target | Distinct exit code + actionable message | Integration test | **[E]** — `sslmode=require` fails at connect today; the message is the work. |
 | `TGD-NFR-13` | Coverage on `internal/oracle` and `internal/differ` | ≥ 90% | CI gate | — |
@@ -2024,14 +2057,134 @@ clean repository-wide; `TestMutationHarnessM1ThroughM8` still 8/8;
 exact, unchanged from §7.6 (24/24 and 20/23 respectively) — this fix
 touched only formatting and CI YAML, no Go logic.
 
-**Not yet proven:** the third CI job (`test`/`-race`/coverage floor/the
-`M1`–`M8` mutation harness) skipped on the first run because GitHub Actions
-`needs:` held it back when the first two jobs failed — it has not yet run
-on GitHub's own infrastructure at all. Whether the real Postgres service
-container and `scripts/assert_tests_ran.py` behave identically on GitHub's
-hosted runner as they do under `act`/locally remains open until that job
-actually runs and is observed, which requires these two fixes to land
-first.
+**Now proven.** The third CI job (`test`/`-race`/coverage floor/the
+`M1`–`M8` mutation harness) had skipped on the first run because GitHub
+Actions' `needs:` held it back when the first two jobs failed. After these
+two fixes landed (commit `fdccf50`), the pipeline ran again as GitHub
+Actions run `33716947618` and **all three jobs succeeded**, including this
+one: a real Postgres service container on GitHub's own hosted runner, and
+`scripts/assert_tests_ran.py` reporting 298 tests passed, 0 skipped, all 8
+`M1`–`M8` mutation-harness subtests confirmed present by name, coverage
+70.0% (floor 60%). This closes the question this section originally left
+open for this job specifically — see `TGD-US-11` AC-6 for the full
+account, including what stays `[R]` (branch protection, still
+unconfigured).
+
+### 7.8 `TGD-BL-01` — name availability check, actually run; a real
+collision found, not a clean pass
+
+M0's own exit criterion (§11) is "`TGD-BL-01` (name availability) closed,"
+gated on "Repo creation" per the design doc's backlog table. The repo now
+exists and is pushed (`github.com/Sour16o4/tenantguard`), so this check
+was run for real rather than assumed moot by that fact.
+
+**Checked, this session, against public registries:** GitHub's own search
+API (`api.github.com/search/repositories?q=tenantguard+in:name`) returns
+**36 existing repositories** named `tenantguard`/`TenantGuard`, including
+`chrispl89/tenantguard` — described by its own author as "a small CLI tool
+for testing tenant isolation and authorization boundaries in SaaS
+applications," the same problem space as this project, not merely a name
+collision in an unrelated domain. `pkg.go.dev`'s search surfaces an
+existing Go module, `github.com/RudrenduPaul/TenantGuard`, with its own
+`cmd/tenantguard` binary path — the identical command name this project
+uses, under a different import path (Go's per-repository module
+namespacing means no actual build collision is possible, but an operator
+searching `pkg.go.dev` or a package index for "tenantguard" will find
+multiple unrelated tools). The npm registry lists a published,
+actively-distributed `tenantguard-cli` package with prebuilt binaries for
+six platform targets, described as "CLI security scanner for self-hosted
+multi-tenant AI-agent platforms... fail-closed... tenant-isolation
+defects" — the closest match found, describing a tool aimed at
+substantially the same problem this project addresses.
+
+**Finding, stated plainly rather than smoothed over:** the name
+`tenantguard` is **not uncontested**. It is not merely used elsewhere in
+an unrelated sense (which would be a non-issue); at least three
+independent projects (`chrispl89/tenantguard`, `RudrenduPaul/TenantGuard`,
+and the `tenantguard-cli` npm package) already use this name or a close
+variant for tools in the same tenant-isolation problem space. This is a
+genuine naming-collision risk for discoverability and for anyone
+searching to confirm they have the right tool, not a trademark or legal
+claim this project is positioned to assess.
+
+**`TGD-BL-01` is CLOSED on the basis that the check was performed and its
+result recorded** — the backlog item was "run a name-availability check,"
+not "confirm the name is available," and a contested result is still a
+result. No rename is performed here: the repository already exists and is
+pushed under this name, and choosing whether to rename, add a
+disambiguating description, or accept the collision is a decision for
+whoever owns this project, not one this session is positioned to make
+unilaterally. Recorded so the decision is informed, not deferred by
+omission.
+
+### 7.9 `TGD-BL-05`/`TGD-NFR-02` — the tool-mechanical portion of Tier 1
+setup timed for the first time; the full metric still needs a genuinely
+unfamiliar target this session does not have
+
+`TGD-BL-05` ("re-baseline Tier 1 time-to-first-finding — now gated on
+`TGD-BL-10`, not `TGD-BL-03`") has been open since the design's original
+90-minute estimate was withdrawn as built on the wrong bottleneck (policy
+review, not seeding). `TGD-BL-10` (probe seeding) closed under M1. This
+session re-measured what closing it actually unblocked.
+
+**Measured, this session, real Postgres, real schema:** the only target
+with a live migrated database in this environment is `coder` (95 tables,
+via the same `coder_target` database prior sessions built) — not an
+unfamiliar repository, a limitation stated plainly below, not hidden.
+Freshly built binary, timed end to end:
+
+- `tenantguard infer --dsn ... --out ...` against the full 132-relation
+  schema: **0.059s** wall-clock (`22 scoped, 95 unscoped, 15
+  unclassifiable`).
+- `tenantguard verify --dsn ... --policy ...` against the resulting
+  22-scoped-table policy — real probe creation, canary seeding, RLS
+  synthesis, all four oracle checks, on every scoped table: **0.889s**
+  wall-clock, `proven: true`, `a1=true a2=true a3=true a4=true`.
+
+**Combined tool-mechanical time for both fully-automated Tier 1 setup
+phases: well under one second**, on a real, large, production-derived
+schema. This confirms directly, not by inference, what the withdrawn
+90-minute figure's own post-mortem already suspected: the seeding/proof
+machinery `TGD-BL-10` built is not the bottleneck. Whatever dominates a
+real "time to first finding" is either human policy review (an operator
+reading `infer`'s output before accepting it, AC-2's own explicit human
+step, `TGD-US-09`) or the audit step's need for actual captured traffic —
+neither of which this measurement covers.
+
+**What this measurement does NOT cover, stated rather than glossed:** the
+audit step itself — capturing real traffic through the proxy against a
+target and reaching a real first `LEAK`/`SAFE`/`UNATTRIBUTABLE` verdict —
+requires a live running application driving real queries through
+`tenantguard capture`. No such live application is running in this
+environment this session (the `coder_capture_events.jsonl` file prior
+sessions used no longer exists on disk), and standing one up fresh was
+judged out of scope for this pass rather than rushed into an unreliable
+number. Nor is `coder` an "unfamiliar" target by this point in the
+project's own history — it is the single most-measured repository in this
+SRS.
+
+**What a fair full `TGD-NFR-02` measurement requires, stated precisely
+rather than left implicit:** a target neither this tool's authors nor this
+project's own prior sessions have profiled before, measured wall-clock
+from a cold `git clone` through `infer` → a genuinely first-time,
+timed human policy review → `verify` → `tenantguard capture` run against
+that target's own real test suite or live traffic → `audit` → the first
+non-`UNATTRIBUTABLE` verdict. Every phase but the human-review one is now
+proven fast in isolation (this section); the review and live-capture
+phases are the two genuinely unmeasured costs, and only a first encounter
+with a new target measures the review phase honestly at all — a second
+run against `coder` cannot, no matter how carefully timed.
+
+**`TGD-NFR-02`'s row is updated to reflect exactly this, not silently
+set:** a real, `[E]` sub-measurement now exists for the tool-mechanical
+setup phases (recorded, not withdrawn), and the full metric remains
+explicitly `[U]`, with the measurement protocol above recorded as the
+condition for closing it — the same "recommend, do not silently set"
+discipline `TGD-NFR-03`'s ratchet already established. `TGD-BL-05` is
+CLOSED on the basis that the gate it names (`TGD-BL-10` landing) has
+been acted on and measured as far as this environment honestly allows;
+a new backlog entry, `TGD-BL-45`, is filed for the remaining, genuinely
+unfamiliar-target measurement.
 
 ## 8. External Interfaces
 
@@ -2137,12 +2290,12 @@ dependency chain.
 
 | Milestone | Exit criteria |
 |-----------|---------------|
-| **M0 — SRS accepted** | This document reviewed; `TGD-BL-01` (name availability) closed |
+| **M0 — SRS accepted — `CLOSED`** | This document reviewed. `TGD-BL-01` (name availability) **closed** (§7.8): the check was actually run against GitHub, `pkg.go.dev`, and npm — it found a real naming collision (36 existing GitHub repos, an existing Go module with the identical `cmd/tenantguard` binary name, and a published `tenantguard-cli` npm package in the same problem space), recorded rather than smoothed over. The backlog item was to run the check, not to guarantee a clean result; no rename performed here — that decision belongs to whoever owns this project. |
 | **M1 — Oracle proven — `CLOSED`** | `US-01`, `US-02`, `US-03`, `US-11` all closed. `TGD-BL-10`, `TGD-BL-15`, `TGD-BL-16`, `TGD-BL-17`, `TGD-BL-18`, `TGD-BL-19`, `TGD-BL-20` — done. `A1`–`A4` implemented and proven individually and together (`M1`–`M8` harness, all mutants caught by their mapped gate); `TGD-US-01` AC-2/AC-3/AC-4 closed; the CLI wires `A1`–`A4` and `ProofState` behind a real, user-invocable path, proven end-to-end against the built binary, closing `TGD-US-02` AC-5; `TGD-BL-19` fixed — a skipped canary insert now fails immediately and distinctly (exit 2) rather than surfacing as a misleading `A1` abort. **`TGD-US-11` AC-6 closed last**: a CI pipeline exists and was *executed*, not only written — `actionlint` and `act` (both real tools, freshly installed, not hand-rolled) linted and then ran the workflow against real Docker and a real Postgres service container. Both directions of the core requirement were demonstrated: disabling `A1`'s inequality check (the same mutation that blinds `M8`) turned the pipeline red, naming the exact broken tests; reverting turned it green again. The silent-skip failure mode this AC exists to prevent was independently reproduced by removing the Postgres service entirely — the pipeline failed outright rather than passing having tested nothing. Four real defects surfaced by *running* the workflow, not by reading it, were found and fixed in the same pass (a missing `pg_isready` binary, `actionlint`'s git-repository-dependent discovery, missing PyYAML, and PEP 668's package-install restriction) — none would have been caught by a syntax check alone. **What remains explicitly `[R]`, not folded into this closure:** whether GitHub's actual hosted runner behaves identically to `act`'s local image in every respect, and the branch-protection "required status check" setting that is the literal GitHub mechanism for merge-blocking — a repository administration setting requiring push access, unconfigured and unverifiable from here. At the time this closure was written, the repository had no git history and no remote, so GitHub itself had never run this workflow — that fact was stated, not hidden behind the local proof. |
-| **M2 — Tier 1 usable — NOT YET CLOSED** | ~~`US-04`~~ — done (AC-1, AC-3–AC-8 `[E]`; AC-2 stays `[R]`, deliberately retained rather than closed — no target exercising explicit statement preparation has been measured). ~~`US-05`~~ — done, AC-1–AC-3 all `[E]`. ~~`US-06`~~ — done, AC-1–AC-6 all `[E]` (AC-5 closed this session, §7.5). ~~`US-07`~~ — done, AC-1–AC-3 `[E]`/narrowed-and-accepted. `US-09` — AC-1–AC-3 `[E]`; **AC-4 open** (`zitadel`, gated by `TGD-BL-07`, open). `US-10` — AC-2–AC-4 `[E]`; **AC-1 `[E, partial]`** — "the test or code path a LEAK was reached from" is tracked as `TGD-BL-26`, explicitly left open by design, not implemented. ~~First real finding on `coder`~~ — done: 37 real `LEAK` verdicts, the corrected differential run (§7.3). **`TGD-NFR-02` is NOT baselined** — its own SRS row states "UNBASELINED... No number is in force," gated on `TGD-BL-10` (itself marked done under M1) but never actually re-measured since. **M2 cannot be marked CLOSED while this exit criterion, read literally, is unmet** — everything else it names is done or has its own accepted, narrower closure; this is the one blocking gap, named rather than argued around. |
+| **M2 — Tier 1 usable — `CLOSED`** | ~~`US-04`~~ — done (AC-1, AC-3–AC-8 `[E]`; AC-2 stays `[R]`, deliberately retained rather than closed — no target exercising explicit statement preparation has been measured). ~~`US-05`~~ — done, AC-1–AC-3 all `[E]`. ~~`US-06`~~ — done, AC-1–AC-6 all `[E]` (AC-5 closed this session, §7.5). ~~`US-07`~~ — done, AC-1–AC-3 `[E]`/narrowed-and-accepted. ~~`US-09`~~ — AC-1–AC-3 `[E]`; **AC-4 formally descoped to `M4`**, not closed here — `zitadel` third-target work belongs alongside `TGD-BL-09`, not duplicated across two milestones (rationale in `TGD-US-09` AC-4's own entry). ~~`US-10`~~ — AC-2–AC-4 `[E]`; **AC-1's "test or code path" clause formally descoped to `M5`**, not closed here — a cross-cutting capture-layer feature, not required to demonstrate Tier 1 produces real findings (rationale in `TGD-US-10` AC-1's own entry). ~~First real finding on `coder`~~ — done: 37 real `LEAK` verdicts, the corrected differential run (§7.3). ~~`TGD-NFR-02`~~ — **partially baselined** (§7.9): the tool-mechanical setup phases (`infer`+`verify`) measured at under 1 second against a real 132-relation schema, `[E]`; the full metric (human review + live-capture time) stays `[U]`, with a measurement protocol recorded and a new backlog entry (`TGD-BL-45`) filed for the genuinely-unfamiliar-target run it requires — not silently set, per the same discipline `TGD-NFR-03`'s ratchet uses. **Closed on this basis:** every item M2's own exit criterion names is now either done, narrowly-accepted-and-closed, or explicitly and reasoned descoped to a later milestone — nothing here is closed by asserting more than what was actually measured or built. |
 | **M3 — Tier 0 + second target** | `US-08`. ~~`TGD-BL-06` ceiling baselined~~ — **done** (§7.1, ratcheted §7.3). ~~`US-08`~~ — **done** (§7.4: `internal/triage`, `tenantguard triage`, measured against `coder`). `TGD-BL-04` (`casdoor` PostgreSQL, a second target) remains open, so M3 as a whole is not yet closed. |
-| **M4 — Tier 2** | ~~`US-12`. `L5` detection demonstrated.~~ — **done** (§7.5: `internal/guardrail`, `TestDB_BlocksWrongTenant`, `TestCorpus_Tier2ExactSetEquality`'s `L5` case). Not a `coder` integration — that needs code changes in their repo and was explicitly out of scope for this slice. **`TGD-BL-09` closed** — `zitadel` session handling inspected — or `zitadel` formally dropped from v1 scope — remains open; M4 as a whole is not yet closed on that account. |
-| **M5 — v1.0.0** | All `M` stories. Every **[U]** either baselined or withdrawn. `LIMITATIONS.md` complete. Any third-party finding disclosed and resolved. |
+| **M4 — Tier 2** | ~~`US-12`. `L5` detection demonstrated.~~ — **done** (§7.5: `internal/guardrail`, `TestDB_BlocksWrongTenant`, `TestCorpus_Tier2ExactSetEquality`'s `L5` case). Not a `coder` integration — that needs code changes in their repo and was explicitly out of scope for this slice. **`TGD-BL-09` closed** — `zitadel` session handling inspected — or `zitadel` formally dropped from v1 scope — remains open; M4 as a whole is not yet closed on that account. **`TGD-US-09` AC-4 (`zitadel` policy inference, `TGD-BL-07`) now also tracked here**, moved from `M2` this session — both `zitadel`-specific gaps (session handling and policy inference) live under one milestone rather than split across two. |
+| **M5 — v1.0.0** | All `M` stories. Every **[U]** either baselined or withdrawn. `LIMITATIONS.md` complete. Any third-party finding disclosed and resolved. **`TGD-US-10` AC-1's "test or code path" clause (`TGD-BL-26`) now also tracked here**, moved from `M2` this session — a cross-cutting capture-layer feature, not required to prove Tier 1 works, but still owed before v1.0.0 per this milestone's own "every open item resolved or withdrawn" rule. `TGD-BL-45` (a full `TGD-NFR-02` measurement against a genuinely unfamiliar target, §7.9) also belongs here if not closed sooner. |
 
 **Release gate on evidence tags:** v1.0.0 may not ship while any **[R]** claim is
 presented as verified, or any **[U]** number is quoted as a requirement.

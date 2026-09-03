@@ -1,0 +1,9 @@
+/tenantguard
+*.test
+coverage.out
+test-output.json
+.env
+.env.*
+/scratchpad/
+*.capture.json
+*.capture.jsonl

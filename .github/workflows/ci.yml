@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: '1.26.7'
+
+jobs:
+  build-vet-fmt:
+    name: build, vet, gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: scripts are executable
+        run: |
+          fail=0
+          for f in scripts/*; do
+            [ -f "$f" ] || continue
+            if [ ! -x "$f" ]; then
+              echo "not executable: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+      - run: go build ./...
+      - run: go vet ./...
+      - name: gofmt check
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would reformat:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  test-race-coverage-harness:
+    name: test (-race), coverage floor, M1-M8 mutation harness
+    runs-on: ubuntu-latest
+    needs: build-vet-fmt
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TGD_TEST_DSN: postgres://postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: wait for postgres
+        # A plain TCP connect via bash's own /dev/tcp, deliberately not
+        # pg_isready: proven by running this workflow locally (act) that
+        # pg_isready is absent from at least one real runner image, which
+        # would have made this step fail on a missing tool rather than on
+        # Postgres actually being down — a false negative worse than no check
+        # at all.
+        run: |
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/localhost/5432) 2>/dev/null; then
+              exec 3<&- 3>&-
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres never became reachable on localhost:5432" >&2
+          exit 1
+      # This step is merge-blocking, not advisory (TGD-US-11 AC-6): it is a
+      # normal step in a normal job, and a non-zero exit here fails the job
+      # like any other. What makes the M1-M8 harness specifically trustworthy
+      # is not this job's structure but scripts/assert_tests_ran.py, run
+      # inside it — a Postgres outage here would otherwise make every oracle
+      # and CLI test skip and this step would still exit 0, having proven
+      # nothing (the exact failure this repository's own docs call out under
+      # TGD-BL-42's shape).
+      - name: test, assert no skips, assert all 8 mutants ran, enforce coverage floor
+        run: ./scripts/run_tests_with_assertions.sh
+
+  workflow-lint:
+    name: lint this workflow file
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - name: actionlint (authoritative Actions schema check)
+        # Pass the file explicitly rather than relying on actionlint's default
+        # discovery, which walks up looking for a .git directory to find
+        # .github/workflows/ — proven locally (via act, on a checkout with no
+        # git history) to fail with "no project was found" when that walk
+        # comes up empty, even though the workflow itself is fine.
+        run: "$(go env GOPATH)/bin/actionlint .github/workflows/ci.yml"
+      - name: parse workflow YAML (belt-and-braces syntax/structure check)
+        # PyYAML is not preinstalled on every runner image, and the runner's
+        # system Python is PEP 668 "externally managed" and refuses a plain
+        # `pip install` — both proven locally, by this step failing first
+        # without pyyaml at all, then failing again on PEP 668 once pyyaml was
+        # added naively. --break-system-packages is safe here specifically
+        # because CI runners are ephemeral and discarded after the job.
+        run: |
+          python3 -m pip install --quiet --break-system-packages pyyaml
+          python3 scripts/check_workflow_yaml.py .github/workflows/*.yml

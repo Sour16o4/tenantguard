@@ -126,8 +126,19 @@ func (p *Policy) Counts() (scoped, unscoped, unclassifiable int) {
 
 // candidateColumns are the column names taken to indicate tenancy, in no
 // priority order — finding more than one is ambiguity, not a ranking problem.
+//
+// instance_id (TGD-BL-07): found missing by running infer against a real
+// Postgres table shaped exactly like zitadel's projections.users14 — the
+// table came back Unscoped, silently exempting a genuinely hard-partitioned
+// table from RLS synthesis, A1/A4 proof, and Tier 2 scoping. resource_owner
+// (zitadel's other candidate tenant column) is deliberately NOT included:
+// it is app-computed visibility (permission-joined, spanning multiple orgs
+// a caller may be granted into), not a database-enforceable partition — the
+// same shape that disqualified go-gitea/gitea and mattermost/mattermost as
+// validation targets (SRS §3.2's "Access-control applications" exclusion).
 var candidateColumns = []string{
 	"tenant_id", "org_id", "organization_id", "workspace_id", "account_id", "owner",
+	"instance_id",
 }
 
 // IsCandidate reports whether a column name indicates tenancy.

@@ -4,10 +4,23 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Sour16o4/tenantguard/internal/schema"
 )
+
+// sortedKeys returns m's keys in a deterministic order — used only to make
+// generated GRANT statement order stable/reproducible across runs, never for
+// correctness (each GRANT is independent of the others' order).
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // column describes one column of a table being seeded.
 type column struct {
@@ -658,20 +671,43 @@ func DropProbeDatabase(ctx context.Context, admin *sql.DB, probe string) error {
 // CHECK clauses separately decide once the attempt is made. Found by running
 // the differ's own insert-fixture test against a SELECT-only role and
 // watching it fail on a privilege error rather than an RLS decision.
-func CreateRestrictedRole(ctx context.Context, db *sql.DB, role, password string) error {
+//
+// relations' own schemas are granted individually (TGD-BL-46): an earlier
+// version of this function hardcoded schema public, which coder and casdoor
+// never exposed as a gap because both kept every scoped table there. zitadel
+// does not — none of its 121 real scoped relations live in public
+// (adminapi/auth/eventstore/projections/system/logstore instead) — so the
+// restricted role could reach none of them, and every table failed identically
+// with "permission denied for schema X" (SRS §7.15). public is always
+// included regardless of relations, matching every fixture and prior target
+// that relies on it implicitly.
+func CreateRestrictedRole(ctx context.Context, db *sql.DB, role, password string, relations []schema.Relation) error {
+	schemas := map[string]bool{"public": true}
+	for _, r := range relations {
+		if r.Schema != "" {
+			schemas[r.Schema] = true
+		}
+	}
+
 	stmts := []string{
 		fmt.Sprintf("DROP ROLE IF EXISTS %s", quoteIdent(role)),
 		fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOBYPASSRLS",
 			quoteIdent(role), strings.ReplaceAll(password, "'", "''")),
-		fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s", quoteIdent(role)),
-		fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %s", quoteIdent(role)),
-		// A serial/bigserial column's DEFAULT calls nextval() on its backing
-		// sequence, which needs its own grant separate from the table's — an
-		// INSERT that never mentions the sequence by name still fails with
-		// "permission denied for sequence" without this. Found the same way
-		// as the statement above: by running the differ's insert fixture and
-		// watching the specific error.
-		fmt.Sprintf("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %s", quoteIdent(role)),
+	}
+	for _, sch := range sortedKeys(schemas) {
+		stmts = append(stmts,
+			fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", quoteIdent(sch), quoteIdent(role)),
+			fmt.Sprintf("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %s TO %s",
+				quoteIdent(sch), quoteIdent(role)),
+			// A serial/bigserial column's DEFAULT calls nextval() on its backing
+			// sequence, which needs its own grant separate from the table's — an
+			// INSERT that never mentions the sequence by name still fails with
+			// "permission denied for sequence" without this. Found the same way
+			// as the statement above: by running the differ's insert fixture and
+			// watching the specific error.
+			fmt.Sprintf("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %s TO %s",
+				quoteIdent(sch), quoteIdent(role)),
+		)
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -206,7 +206,7 @@ func uuidFixture(t *testing.T, name string) *fixture {
 	}
 	f.probeDB = openDB(t, dsnFor(t, f.probe, "", ""))
 
-	if err := CreateRestrictedRole(ctx, f.probeDB, f.roleName, f.rolePass); err != nil {
+	if err := CreateRestrictedRole(ctx, f.probeDB, f.roleName, f.rolePass, []schema.Relation{f.rel}); err != nil {
 		t.Fatalf("create role: %v", err)
 	}
 	t.Cleanup(func() {

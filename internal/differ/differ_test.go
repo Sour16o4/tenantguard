@@ -137,7 +137,7 @@ func newDiffFixture(t *testing.T, name string) *diffFixture {
 			Class: schema.Scoped, TenantColumn: "tenant_id"})
 
 	roleName := "tgd_differ_role_" + name
-	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, "differpw"); err != nil {
+	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, "differpw", relations); err != nil {
 		t.Fatalf("create restricted role: %v", err)
 	}
 	t.Cleanup(func() {
@@ -395,6 +395,216 @@ func TestDiff_WriteAcceptedByRLSIsSafe(t *testing.T) {
 	f.probeDB.QueryRowContext(ctx, "SELECT count(*) FROM invoices").Scan(&after)
 	if after != before {
 		t.Fatalf("row count changed %d -> %d; a rolled-back insert must never persist", before, after)
+	}
+}
+
+// --- TGD-BL-35: a captured write colliding with the probe's own history ---
+//
+// newConflictFixture builds tables shaped for TGD-BL-35's own two measured
+// real-target collision shapes (SRS §7.15/§7.16): a single-column literal
+// key (coder's own InsertOrganizationMember/InsertTemplate/InsertTemplateVersion
+// shape) and a composite key (zitadel's own
+// eventstore.unique_constraints/projections.current_states shape, both
+// (instance_id, ...) primary keys) — each pre-seeded with one real row a
+// captured INSERT can collide with, exactly the way a captured write
+// colliding with the probe's own TEMPLATE-copied history does for real.
+func newConflictFixture(t *testing.T, name string) *diffFixture {
+	t.Helper()
+	ctx := context.Background()
+	base := adminDSN(t)
+	admin, err := sql.Open("postgres", base)
+	if err != nil {
+		t.Fatalf("open admin: %v", err)
+	}
+
+	probeName := "tgd_conflict_" + name
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", probeName)); err != nil {
+		t.Fatalf("drop stale probe: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE %q", probeName)); err != nil {
+		t.Fatalf("create probe: %v", err)
+	}
+	t.Cleanup(func() {
+		admin.ExecContext(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", probeName))
+		admin.Close()
+	})
+
+	probeDSN := dsnFor(t, base, probeName, "", "")
+	probeDB, err := sql.Open("postgres", probeDSN)
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	t.Cleanup(func() { probeDB.Close() })
+
+	schemaSQL := `
+		CREATE TABLE org_members (
+			id text PRIMARY KEY,
+			tenant_id text NOT NULL,
+			user_id text NOT NULL
+		);
+		INSERT INTO org_members (id, tenant_id, user_id) VALUES
+			('member-1', 'acme', 'user-1');
+
+		CREATE TABLE unique_constraints (
+			instance_id text NOT NULL,
+			unique_type text NOT NULL,
+			unique_field text NOT NULL,
+			PRIMARY KEY (instance_id, unique_type, unique_field)
+		);
+		INSERT INTO unique_constraints (instance_id, unique_type, unique_field) VALUES
+			('acme', 'migration_started', '14_events_push');
+	`
+	if _, err := probeDB.ExecContext(ctx, schemaSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	relations := []schema.Relation{
+		{Schema: "public", Name: "org_members", Kind: "BASE TABLE",
+			Class: schema.Scoped, TenantColumn: "tenant_id"},
+		{Schema: "public", Name: "unique_constraints", Kind: "BASE TABLE",
+			Class: schema.Scoped, TenantColumn: "instance_id"},
+	}
+	for _, r := range relations {
+		if err := oracle.EnableRLS(ctx, probeDB, r, "tgd_policy_"+r.Name); err != nil {
+			t.Fatalf("enable RLS on %s: %v", r.Name, err)
+		}
+	}
+
+	roleName := "tgd_conflict_role_" + name
+	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, "conflictpw", relations); err != nil {
+		t.Fatalf("create restricted role: %v", err)
+	}
+	t.Cleanup(func() {
+		probeDB.ExecContext(context.Background(), fmt.Sprintf("DROP ROLE IF EXISTS %q", roleName))
+	})
+	restrictedDSN := dsnFor(t, base, probeName, roleName, "conflictpw")
+	restricted, err := sql.Open("postgres", restrictedDSN)
+	if err != nil {
+		t.Fatalf("open restricted: %v", err)
+	}
+	t.Cleanup(func() { restricted.Close() })
+
+	return &diffFixture{admin: admin, probeName: probeName, probeDB: probeDB,
+		restricted: restricted, roleName: roleName, relations: relations}
+}
+
+// TestDiff_DuplicateKeyOnReplay_SingleColumnKey_Resolves is TGD-BL-35's
+// regression test for coder's own measured shape: a captured INSERT
+// literally replaying a row the probe's own history already contains, on a
+// single-column primary key. Before the fix, this failed with a raw
+// PostgreSQL 23505 and came back Unattributable — not because tenant
+// scoping was wrong, but because the probe already held this exact row.
+// After the fix, the colliding row is deleted (and restored — see the
+// postcondition below) inside the same rolled-back transaction, and the
+// write is genuinely compared: the claimed tenant matches the row that was
+// there, so this must resolve to a definite verdict, not Unattributable.
+func TestDiff_DuplicateKeyOnReplay_SingleColumnKey_Resolves(t *testing.T) {
+	ctx := context.Background()
+	f := newConflictFixture(t, "singlecol")
+
+	ev := capture.Event{Resolved: true,
+		SQL:    "INSERT INTO org_members (id, tenant_id, user_id) VALUES ($1, $2, $3)",
+		Params: evParams("member-1", "acme", "user-1")}
+	r := Diff(ctx, f.probeDB, f.restricted, f.relations, ev)
+
+	if r.Verdict == Unattributable {
+		t.Fatalf("verdict = Unattributable (%s), want a definite verdict — "+
+			"the duplicate-key collision should have been resolved, not left unattributable", r.Reason)
+	}
+	if r.Verdict != Safe {
+		t.Errorf("verdict = %v (%s), want Safe — the claimed tenant (acme) matches the "+
+			"pre-existing row's own tenant, so a correctly-scoped policy admits it", r.Verdict, r.Reason)
+	}
+
+	// TGD-BL-35's own resolution mechanism deletes-then-retries inside a
+	// transaction that is always rolled back — the pre-existing row must
+	// still be there afterward, unchanged, the same "never a durable write"
+	// guarantee every other re-execution in this package already gives
+	// (§3.3).
+	var tenant string
+	if err := f.probeDB.QueryRowContext(ctx,
+		"SELECT tenant_id FROM org_members WHERE id = 'member-1'").Scan(&tenant); err != nil {
+		t.Fatalf("pre-existing row missing after Diff — the conflict resolution's delete must be "+
+			"rolled back, never durable: %v", err)
+	}
+	if tenant != "acme" {
+		t.Errorf("pre-existing row's tenant_id = %q, want unchanged %q", tenant, "acme")
+	}
+	var count int
+	f.probeDB.QueryRowContext(ctx, "SELECT count(*) FROM org_members").Scan(&count)
+	if count != 1 {
+		t.Errorf("org_members has %d rows, want exactly 1 (the original) — no durable insert either", count)
+	}
+}
+
+// TestDiff_DuplicateKeyOnReplay_CompositeKey_Resolves is TGD-BL-35's
+// regression test for zitadel's own measured shape: the identical mechanism,
+// on a 3-column composite primary key — the shape that accounted for 93.5%
+// of zitadel's own row_level_unattributed population (SRS §7.16) before
+// this fix.
+func TestDiff_DuplicateKeyOnReplay_CompositeKey_Resolves(t *testing.T) {
+	ctx := context.Background()
+	f := newConflictFixture(t, "compositekey")
+
+	ev := capture.Event{Resolved: true,
+		SQL:    "INSERT INTO unique_constraints (instance_id, unique_type, unique_field) VALUES ($1, $2, $3)",
+		Params: evParams("acme", "migration_started", "14_events_push")}
+	r := Diff(ctx, f.probeDB, f.restricted, f.relations, ev)
+
+	if r.Verdict == Unattributable {
+		t.Fatalf("verdict = Unattributable (%s), want a definite verdict on this composite-key collision", r.Reason)
+	}
+	if r.Verdict != Safe {
+		t.Errorf("verdict = %v (%s), want Safe", r.Verdict, r.Reason)
+	}
+
+	var count int
+	f.probeDB.QueryRowContext(ctx, "SELECT count(*) FROM unique_constraints").Scan(&count)
+	if count != 1 {
+		t.Errorf("unique_constraints has %d rows, want exactly 1 (the original, restored) — no durable insert", count)
+	}
+}
+
+// TestDiff_DuplicateKeyOnReplay_RLSBlocksResolution_NeverSafe is the safety
+// constraint this fix must uphold in the one direction that matters most:
+// when the pre-existing colliding row belongs to a DIFFERENT tenant than
+// the captured write claims, the restricted role's own attempt to clear it
+// is correctly blocked by row-level security (it is not that tenant's row
+// to delete) — the collision must stay genuinely unresolved for that leg.
+// This must fail toward Unattributable, never be treated as license to
+// report Safe, and — equally — must not be misreported as Leak either: the
+// restricted leg's real INSERT was never even attempted, so claiming a
+// row-security *rejection* would fabricate a finding this run never tested.
+func TestDiff_DuplicateKeyOnReplay_RLSBlocksResolution_NeverSafe(t *testing.T) {
+	ctx := context.Background()
+	f := newConflictFixture(t, "blocked")
+
+	// The pre-existing row belongs to "acme" (from the fixture). This event
+	// claims a DIFFERENT tenant, "globex", for the identical (id) key —
+	// the shape a genuine cross-tenant key collision or a misattributed
+	// capture would produce.
+	ev := capture.Event{Resolved: true,
+		SQL:    "INSERT INTO org_members (id, tenant_id, user_id) VALUES ($1, $2, $3)",
+		Params: evParams("member-1", "globex", "user-2")}
+	r := Diff(ctx, f.probeDB, f.restricted, f.relations, ev)
+
+	if r.Verdict == Safe {
+		t.Fatalf("verdict = Safe (%s) — must NEVER report Safe when the restricted role's own "+
+			"conflict resolution was blocked by row-level security", r.Reason)
+	}
+	if r.Verdict == Leak {
+		t.Fatalf("verdict = Leak (%s) — must not fabricate a row-security rejection either: "+
+			"the restricted leg's real write was never attempted here", r.Reason)
+	}
+	if r.Verdict != Unattributable {
+		t.Errorf("verdict = %v (%s), want Unattributable", r.Verdict, r.Reason)
+	}
+
+	// Same durability guarantee: the original row is untouched.
+	var tenant string
+	f.probeDB.QueryRowContext(ctx, "SELECT tenant_id FROM org_members WHERE id = 'member-1'").Scan(&tenant)
+	if tenant != "acme" {
+		t.Errorf("pre-existing row's tenant_id = %q, want unchanged %q", tenant, "acme")
 	}
 }
 

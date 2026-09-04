@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	_ "github.com/lib/pq"
 
+	"github.com/Sour16o4/tenantguard/internal/oracle"
 	"github.com/Sour16o4/tenantguard/internal/schema"
 )
 
@@ -50,6 +53,54 @@ func TestAggregateProof_OneTableFailsA4(t *testing.T) {
 	})
 	if !ps.A4Checked || ps.A4Passed {
 		t.Fatalf("got %+v, want A4Passed=false — one bad table must fail the whole sweep", ps)
+	}
+}
+
+// TestNameUnderlyingTableError_SurfacesRealCause is TGD-BL-46's regression
+// test for the second, connected defect: PolicyProven()'s bare ErrA1 reads
+// as "the RLS policy is wrong" regardless of the real cause, which misled
+// this exact investigation (SRS §7.15) into first suspecting zitadel's RLS
+// synthesis before tracing the abort to a schema-grant gap. The real
+// underlying error (a table's own A1Err, e.g. "permission denied for schema
+// adminapi") must reach the operator-facing message, named against the
+// specific table it came from — not silently discarded in favour of the
+// generic text.
+func TestNameUnderlyingTableError_SurfacesRealCause(t *testing.T) {
+	underlying := fmt.Errorf("A1: count restricted: pq: permission denied for schema adminapi")
+	genericA1 := fmt.Errorf("%w", oracle.ErrA1)
+
+	got := nameUnderlyingTableError(genericA1, []tableProof{
+		{Table: "adminapi.styling2", Seeded: true, A1Passed: false, A1Err: underlying},
+	})
+
+	if got == nil {
+		t.Fatal("got nil, want an error naming the real cause")
+	}
+	if !errors.Is(got, oracle.ErrA1) {
+		t.Errorf("got %v, want it to still satisfy errors.Is(err, oracle.ErrA1) — "+
+			"the CLI's own exit-code dispatch depends on this", got)
+	}
+	if !strings.Contains(got.Error(), "adminapi.styling2") {
+		t.Errorf("got %q, want it to name the specific failing table", got.Error())
+	}
+	if !strings.Contains(got.Error(), "permission denied for schema adminapi") {
+		t.Errorf("got %q, want the real underlying cause to reach the operator, "+
+			"not just the generic \"oracle is blind\" text", got.Error())
+	}
+}
+
+// TestNameUnderlyingTableError_NoRealCauseKnownIsUnchanged: when no table
+// recorded a real underlying error (e.g. the "nothing ever seeded" path,
+// handled separately before this function is reached), PolicyProven()'s own
+// generic error passes through unchanged rather than being altered or
+// wrapped with nothing useful added.
+func TestNameUnderlyingTableError_NoRealCauseKnownIsUnchanged(t *testing.T) {
+	genericA1 := fmt.Errorf("%w", oracle.ErrA1)
+	got := nameUnderlyingTableError(genericA1, []tableProof{
+		{Table: "public.a", Seeded: true, A1Passed: false},
+	})
+	if got != genericA1 {
+		t.Errorf("got %v, want the original error unchanged when no table has a recorded A1Err", got)
 	}
 }
 

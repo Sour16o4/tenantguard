@@ -3,9 +3,13 @@ package differ
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/lib/pq"
 
 	"github.com/Sour16o4/tenantguard/internal/capture"
 	"github.com/Sour16o4/tenantguard/internal/oracle"
@@ -202,9 +206,125 @@ func runRolledBackAsTenant(ctx context.Context, db *sql.DB, tenant, sqlText stri
 	return out, rows.Err()
 }
 
+// conflictKey identifies the row that made a captured write's re-execution
+// collide with the probe's own pre-existing history (TGD-BL-35). Schema and
+// Table come from PostgreSQL's own structured error fields (never guessed);
+// Cols/Vals come from parsing the unique-violation's Detail message, in the
+// same order — never derived from the INSERT's own bound args, which would
+// require correctly understanding arbitrary INSERT shapes. Postgres's own
+// error already names precisely what collided, regardless of how the
+// statement computed it.
+type conflictKey struct {
+	Schema, Table string
+	Cols, Vals    []string
+}
+
+// duplicateKeyDetailPattern matches PostgreSQL's own stable unique-violation
+// Detail format: `Key (col1, col2)=(val1, val2) already exists.` — observed
+// directly against real PostgreSQL 16/18, both a single- and a composite-key
+// case (TGD-BL-35's two measured shapes: coder's single-uuid-column PKs,
+// zitadel's composite instance_id/... PKs). Column and value lists are
+// comma-space-joined by Postgres itself; a value containing the literal
+// substring ", " would misparse — an honest, narrow limitation matching this
+// codebase's own splitTopLevel precedent (its own documented quote-counting
+// limitation), not silently guessed past: parseDuplicateKeyDetail reports
+// ok=false rather than a wrong split whenever the column/value counts
+// disagree.
+var duplicateKeyDetailPattern = regexp.MustCompile(`^Key \((.+)\)=\((.*)\) already exists\.$`)
+
+func parseDuplicateKeyDetail(detail string) (cols, vals []string, ok bool) {
+	m := duplicateKeyDetailPattern.FindStringSubmatch(detail)
+	if m == nil {
+		return nil, nil, false
+	}
+	cols = splitDetailList(m[1])
+	vals = splitDetailList(m[2])
+	if len(cols) == 0 || len(cols) != len(vals) {
+		return nil, nil, false
+	}
+	return cols, vals, true
+}
+
+func splitDetailList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ", ")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
+}
+
+// asConflictKey turns a PostgreSQL unique_violation (SQLSTATE 23505) into a
+// conflictKey, or reports ok=false when it cannot — err is not a 23505 at
+// all, or (TGD-BL-35, found running this fix against a restricted role
+// under RLS) Detail is empty. PostgreSQL itself withholds Detail on a unique
+// violation from a non-superuser/non-owning role once the table has RLS
+// enabled — confirmed directly against real PostgreSQL: the identical
+// collision that carries a full Detail for the unrestricted (superuser)
+// connection carries none for the restricted role's own connection,
+// deliberately, so a constraint error cannot be used as a side channel to
+// learn about a row RLS would otherwise hide. This is exactly why diffWrite
+// resolves the conflict once, via the unrestricted leg (always superuser,
+// always full Detail), and hands the same conflictKey forward to the
+// restricted leg rather than asking it to resolve its own — it structurally
+// cannot.
+func asConflictKey(err error) (conflictKey, bool) {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) || pqErr.Code != "23505" {
+		return conflictKey{}, false
+	}
+	cols, vals, ok := parseDuplicateKeyDetail(pqErr.Detail)
+	if !ok {
+		return conflictKey{}, false
+	}
+	return conflictKey{Schema: pqErr.Schema, Table: pqErr.Table, Cols: cols, Vals: vals}, true
+}
+
+// deleteConflictingRow removes the exact row conflictKey identifies, inside
+// tx (which the caller always rolls back regardless of outcome — see
+// execRolledBack/execRolledBackAsTenant's own doc comments — so this is
+// never a durable write, satisfying §3.3 the same way every other write this
+// package performs against the probe already does). Returns the number of
+// rows deleted; 0 is not an error — on the restricted leg specifically, it
+// means row-level security itself declined to let this role delete that
+// row (the pre-existing row belongs to a tenant this session is not scoped
+// to), which the caller must treat as an unresolved collision, never as
+// license to proceed.
+func deleteConflictingRow(ctx context.Context, tx *sql.Tx, ck conflictKey) (int64, error) {
+	where := make([]string, len(ck.Cols))
+	args := make([]any, len(ck.Vals))
+	for i, c := range ck.Cols {
+		where[i] = fmt.Sprintf("%s = $%d", quoteIdent(c), i+1)
+		args[i] = ck.Vals[i]
+	}
+	stmt := fmt.Sprintf("DELETE FROM %s.%s WHERE %s",
+		quoteIdent(ck.Schema), quoteIdent(ck.Table), strings.Join(where, " AND "))
+	res, err := tx.ExecContext(ctx, stmt, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// maxConflictRetries bounds how many times execRolledBack/AsTenant will
+// delete-and-retry a colliding statement before giving up — a real captured
+// multi-row INSERT could in principle collide on more than one of its own
+// rows in sequence; this is not infinite so a pathological or misidentified
+// case fails closed (returns the error) rather than looping.
+const maxConflictRetries = 3
+
 // execRolledBack executes sqlText with args as a statement (ExecContext, not
 // QueryContext) inside a transaction on db, and always rolls back. Returns
-// the number of rows the statement reports having affected.
+// the number of rows the statement reports having affected, and — TGD-BL-35
+// — the conflictKey it resolved along the way, if any, so diffWrite can hand
+// the identical key to the restricted leg rather than asking it to derive
+// its own (which it structurally cannot — see asConflictKey's doc comment).
 //
 // TGD-BL-40: this is what makes write-path Vacuous detection possible.
 // QueryContext (runRolledBack's mechanism) reports no row data at all for a
@@ -216,28 +336,73 @@ func runRolledBackAsTenant(ctx context.Context, db *sql.DB, tenant, sqlText stri
 // itself and still returns the real affected count via
 // readExecuteResponse/simpleExec, so this needs no RETURNING-vs-not branch:
 // one code path serves both.
-func execRolledBack(ctx context.Context, db *sql.DB, sqlText string, args []any) (int64, error) {
+//
+// TGD-BL-35: on a unique-violation, the probe's own history — not the
+// tenant scoping being tested — is what's failing the statement (the exact
+// row this write creates already exists, because the real write already
+// happened once, for real, before the probe's TEMPLATE copy was taken).
+// Deleting that one row inside this same transaction (rolled back either
+// way, so never a durable write) and retrying once makes the comparison
+// this function exists for actually happen, instead of failing before RLS
+// is ever evaluated at all. A conflict this function cannot resolve (no
+// Detail, unparseable Detail, the delete itself fails) is returned as the
+// original error, unresolved — never silently treated as success.
+func execRolledBack(ctx context.Context, db *sql.DB, sqlText string, args []any) (int64, conflictKey, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+		return 0, conflictKey{}, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx, sqlText, args...)
-	if err != nil {
-		return 0, fmt.Errorf("exec: %w", err)
+	var resolved conflictKey
+	for attempt := 0; attempt < maxConflictRetries; attempt++ {
+		// PostgreSQL aborts an entire transaction the instant any statement
+		// inside it errors — every subsequent statement (including the
+		// DELETE this loop needs to run next) is refused with "current
+		// transaction is aborted" until either the whole transaction ends
+		// or execution returns to a SAVEPOINT set before the failure.
+		// Confirmed directly against real Postgres before adding this: the
+		// delete-then-retry attempt below fails outright without it. The
+		// savepoint is released implicitly by the loop's next iteration (a
+		// fresh SAVEPOINT of the same name simply moves it) or by this
+		// function's own tx.Rollback(), never explicitly committed — no
+		// path here durably writes anything, satisfying §3.3 the same way
+		// every other write in this package already does.
+		if _, err := tx.ExecContext(ctx, "SAVEPOINT tgd_conflict_retry"); err != nil {
+			return 0, resolved, fmt.Errorf("savepoint: %w", err)
+		}
+		res, err := tx.ExecContext(ctx, sqlText, args...)
+		if err == nil {
+			n, rerr := res.RowsAffected()
+			if rerr != nil {
+				return 0, resolved, fmt.Errorf("rows affected: %w", rerr)
+			}
+			return n, resolved, nil
+		}
+		if _, rbErr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT tgd_conflict_retry"); rbErr != nil {
+			return 0, resolved, fmt.Errorf("exec: %w (rollback to savepoint also failed: %v)", err, rbErr)
+		}
+		ck, ok := asConflictKey(err)
+		if !ok {
+			return 0, resolved, fmt.Errorf("exec: %w", err)
+		}
+		deleted, derr := deleteConflictingRow(ctx, tx, ck)
+		if derr != nil || deleted == 0 {
+			return 0, resolved, fmt.Errorf("exec: %w", err)
+		}
+		resolved = ck
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("rows affected: %w", err)
-	}
-	return n, nil
+	return 0, resolved, fmt.Errorf("exec: gave up after %d colliding rows in one statement", maxConflictRetries)
 }
 
 // execRolledBackAsTenant is execRolledBack, but on a dedicated connection
 // with the session tenant set first, for the restricted role — the write-path
-// counterpart of runRolledBackAsTenant.
-func execRolledBackAsTenant(ctx context.Context, db *sql.DB, tenant, sqlText string, args []any) (int64, error) {
+// counterpart of runRolledBackAsTenant. known, when non-zero (its Cols is
+// non-empty), is the conflictKey the unrestricted leg already resolved for
+// this identical statement — used directly instead of parsing this leg's own
+// error, which (TGD-BL-35, asConflictKey's own doc comment) carries no
+// Detail for a non-superuser role under RLS.
+func execRolledBackAsTenant(ctx context.Context, db *sql.DB, tenant, sqlText string, args []any, known conflictKey) (int64, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("acquire connection: %w", err)
@@ -254,6 +419,28 @@ func execRolledBackAsTenant(ctx context.Context, db *sql.DB, tenant, sqlText str
 		return 0, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// The known conflict, if any, is dealt with before the first attempt —
+	// the restricted role's own error on the identical collision carries no
+	// Detail to re-derive it from, so there is nothing to gain from trying
+	// the statement first the way execRolledBack does.
+	if len(known.Cols) > 0 {
+		deleted, derr := deleteConflictingRow(ctx, tx, known)
+		if derr != nil || deleted == 0 {
+			// TGD-BL-35's own safety rule: 0 rows deleted means this role's
+			// policy did not admit the pre-existing row for deletion — the
+			// collision is genuinely unresolved for this leg, and must fail
+			// toward UNATTRIBUTABLE, never be treated as license to proceed
+			// as if it had been resolved. Deliberately worded without the
+			// literal phrase isRowSecurityViolation checks for: the actual
+			// INSERT was never even attempted here, so classifying this as a
+			// row-security *rejection* (diffWrite's Leak path) would fabricate
+			// a finding this leg never tested at all — a wrong, confident
+			// answer in the other direction, exactly as unacceptable as Safe.
+			return 0, fmt.Errorf("exec: restricted role's policy did not admit " +
+				"the pre-existing conflicting row for removal (delete affected 0 rows, or failed)")
+		}
+	}
 
 	res, err := tx.ExecContext(ctx, sqlText, args...)
 	if err != nil {
@@ -542,13 +729,20 @@ func skipSpaceFrom(s string, i int) int {
 // exact way, by hand, before this instrumentation existed to catch it
 // automatically).
 func diffWrite(ctx context.Context, probeDB, restrictedDB *sql.DB, tenant, sqlText string, args []any) Result {
-	unrestrictedAffected, unrestrictedErr := execRolledBack(ctx, probeDB, sqlText, args)
+	unrestrictedAffected, resolvedConflict, unrestrictedErr := execRolledBack(ctx, probeDB, sqlText, args)
 	if unrestrictedErr != nil {
 		return Result{Verdict: Unattributable,
 			Reason: fmt.Sprintf("unrestricted re-execution failed: %v", unrestrictedErr)}
 	}
 
-	restrictedAffected, restrictedErr := execRolledBackAsTenant(ctx, restrictedDB, tenant, sqlText, args)
+	// TGD-BL-35: resolvedConflict is zero-valued (Cols empty) on the common
+	// path where nothing collided; when the unrestricted leg above DID
+	// resolve a collision, the restricted leg is handed the identical
+	// conflictKey rather than being asked to derive its own — it structurally
+	// cannot, since PostgreSQL withholds Detail from a non-superuser role's
+	// unique-violation once RLS is enabled (execRolledBackAsTenant's own doc
+	// comment).
+	restrictedAffected, restrictedErr := execRolledBackAsTenant(ctx, restrictedDB, tenant, sqlText, args, resolvedConflict)
 	switch {
 	case restrictedErr == nil:
 		return Result{Verdict: Safe, Tenant: tenant,

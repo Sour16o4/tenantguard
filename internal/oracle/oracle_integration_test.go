@@ -141,7 +141,7 @@ func newFixture(t *testing.T, name string, tenants []string) *fixture {
 	}
 	t.Cleanup(func() { f.probeDB.Close() })
 
-	if err := CreateRestrictedRole(ctx, f.probeDB, f.roleName, f.rolePass); err != nil {
+	if err := CreateRestrictedRole(ctx, f.probeDB, f.roleName, f.rolePass, []schema.Relation{f.rel}); err != nil {
 		t.Fatalf("create role: %v", err)
 	}
 	t.Cleanup(func() {
@@ -449,6 +449,89 @@ func TestCreateRestrictedRoleDefaultsDenyBypass(t *testing.T) {
 	}
 	if bypass {
 		t.Errorf("CreateRestrictedRole's own role has BYPASSRLS by default")
+	}
+}
+
+// TestCreateRestrictedRoleGrantsNonPublicSchema is TGD-BL-46's regression
+// test. CreateRestrictedRole used to hardcode its GRANTs to schema public —
+// coder and casdoor both happened to keep every scoped table there, so this
+// was never exercised until zitadel's real schema (adminapi/auth/eventstore/
+// projections/system, zero relations in public) hit it for real: verify
+// could not prove a single one of zitadel's 121 scoped tables, all failing
+// identically with "permission denied for schema adminapi" on the restricted
+// connection (SRS §7.15). This test reproduces that shape directly: a scoped
+// table in a schema OTHER than public, exactly the property every fixture
+// elsewhere in this file lacks (newFixture's own table is always
+// public.invoices).
+func TestCreateRestrictedRoleGrantsNonPublicSchema(t *testing.T) {
+	ctx := context.Background()
+	admin := openAdmin(t)
+
+	const source, probe = "tgd_src_nonpub", "tgd_probe_nonpub"
+	exec := func(db *sql.DB, q string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	exec(admin, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", probe))
+	exec(admin, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", source))
+	exec(admin, fmt.Sprintf("CREATE DATABASE %q", source))
+	t.Cleanup(func() {
+		admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", probe))
+		admin.ExecContext(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %q WITH (FORCE)", source))
+	})
+
+	src, err := sql.Open("postgres", dsnFor(t, source, "", ""))
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	// adminapi.styling2's own shape (SRS §7.15): the scoped table lives
+	// outside public, the same as every one of zitadel's real 121 relations.
+	exec(src, `CREATE SCHEMA adminapi`)
+	exec(src, `CREATE TABLE adminapi.styling2 (
+		aggregate_id text NOT NULL,
+		instance_id text NOT NULL,
+		primary_color text,
+		PRIMARY KEY (instance_id, aggregate_id))`)
+	exec(src, `INSERT INTO adminapi.styling2 (aggregate_id, instance_id, primary_color) VALUES
+		('a1', 'tenant-one', '#111'), ('a2', 'tenant-two', '#222')`)
+	src.Close()
+
+	if err := CreateProbeDatabase(ctx, admin, source, probe); err != nil {
+		t.Fatalf("create probe: %v", err)
+	}
+	probeDB, err := sql.Open("postgres", dsnFor(t, probe, "", ""))
+	if err != nil {
+		t.Fatalf("open probe: %v", err)
+	}
+	t.Cleanup(func() { probeDB.Close() })
+
+	rel := schema.Relation{Schema: "adminapi", Name: "styling2", Kind: "BASE TABLE",
+		Class: schema.Scoped, TenantColumn: "instance_id"}
+
+	const roleName, rolePass = "tgd_role_nonpub", "tgdpass"
+	if err := CreateRestrictedRole(ctx, probeDB, roleName, rolePass, []schema.Relation{rel}); err != nil {
+		t.Fatalf("create role: %v", err)
+	}
+	t.Cleanup(func() {
+		probeDB.ExecContext(ctx, fmt.Sprintf("DROP ROLE IF EXISTS %q", roleName))
+	})
+
+	restricted, err := sql.Open("postgres", dsnFor(t, probe, roleName, rolePass))
+	if err != nil {
+		t.Fatalf("open restricted: %v", err)
+	}
+	t.Cleanup(func() { restricted.Close() })
+
+	var count int
+	err = restricted.QueryRowContext(ctx, "SELECT count(*) FROM adminapi.styling2").Scan(&count)
+	if err != nil {
+		t.Fatalf("restricted role could not read adminapi.styling2 — CreateRestrictedRole's "+
+			"grants did not reach this table's own schema: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (both rows, no RLS enabled yet on this table)", count)
 	}
 }
 

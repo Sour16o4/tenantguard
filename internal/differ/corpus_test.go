@@ -499,7 +499,7 @@ func newCorpusFixture(t *testing.T) *corpusDBFixture {
 	// above already exists: its GRANT ... ON ALL TABLES IN SCHEMA public is a
 	// snapshot, not a standing default, and views are included under "ALL
 	// TABLES" exactly as base tables are.
-	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, "corpuspw"); err != nil {
+	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, "corpuspw", relations); err != nil {
 		t.Fatalf("create restricted role: %v", err)
 	}
 	t.Cleanup(func() {

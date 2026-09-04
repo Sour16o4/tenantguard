@@ -57,6 +57,15 @@ type tableProof struct {
 	SeedSource string
 	A1Passed   bool
 	A4Passed   bool
+	// A1Err/A4Err (TGD-BL-46) are the real error CheckA1/CheckA4 returned
+	// when A1Passed/A4Passed is false — nil when the check passed. Kept
+	// distinct from ProofState's own generic ErrA1/ErrA4 so the operator-
+	// facing message can name the actual cause (a permission/grant gap, a
+	// connection error) rather than always reading as "the RLS policy is
+	// wrong" — the same misleading-message shape TGD-BL-19 already fixed
+	// for a skipped canary insert.
+	A1Err error
+	A4Err error
 }
 
 // runOracleGate builds a probe database from adminDSN's current database,
@@ -168,7 +177,7 @@ func runOracleGate(ctx context.Context, adminDSN string, rels []schema.Relation,
 	if err != nil {
 		return gateResult{}, fmt.Errorf("generate role password: %w", err)
 	}
-	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, rolePass); err != nil {
+	if err := oracle.CreateRestrictedRole(ctx, probeDB, roleName, rolePass, scoped); err != nil {
 		return gateResult{}, fmt.Errorf("create restricted role: %w", err)
 	}
 	defer probeDB.ExecContext(context.Background(), fmt.Sprintf("DROP ROLE IF EXISTS %q", roleName))
@@ -276,6 +285,7 @@ func runOracleGate(ctx context.Context, adminDSN string, rels []schema.Relation,
 		tableProofs = append(tableProofs, tableProof{
 			Table: r.Qualified(), Seeded: true, SeedSource: string(seedSource[r.Qualified()]),
 			A1Passed: a1err == nil, A4Passed: a4err == nil,
+			A1Err: a1err, A4Err: a4err,
 		})
 		rowLevel = append(rowLevel, r)
 	}
@@ -298,7 +308,7 @@ func runOracleGate(ctx context.Context, adminDSN string, rels []schema.Relation,
 		if len(rowLevel) == 0 && len(skipped) > 0 {
 			return result, fmt.Errorf("%w: %s: %s", errSeedingSkipped, skipped[0].Table, skipped[0].Reason)
 		}
-		return result, err
+		return result, nameUnderlyingTableError(err, tableProofs)
 	}
 	if onProven != nil {
 		// rowLevel, not scoped: a structural-only table (never row-level
@@ -347,6 +357,45 @@ func aggregateProof(tableProofs []tableProof) oracle.ProofState {
 		}
 	}
 	return ps
+}
+
+// nameUnderlyingTableError (TGD-BL-46) makes PolicyProven()'s generic
+// ErrA1/ErrA4 name the specific table and real underlying cause when one is
+// known, rather than always reading as "the RLS policy is wrong." err is
+// PolicyProven()'s own return value (bare ErrA1/ErrA2/ErrA3/ErrA4, or nil);
+// tableProofs is the same per-table detail aggregateProof folded from.
+//
+// Without this, a permission/grant gap (a table's schema never granted to
+// the restricted role — TGD-BL-46's own root cause, found running zitadel's
+// real, non-public-schema tables) surfaced as the same bare "A1: negative
+// control did not withhold rows; the oracle is blind" a genuine RLS defect
+// produces — the same misleading-message shape TGD-BL-19 already fixed for
+// a skipped canary insert reading like an A1 failure. An operator hitting
+// this would investigate the wrong thing entirely: the policy, not the
+// grant.
+//
+// A pure function, not inlined, for the identical reason aggregateProof is
+// (its own doc comment): there is no way to make one table's A1/A4 outcome
+// diverge from another's through the CLI's own end-to-end surface without a
+// database-level defect this project's design does not otherwise construct
+// — direct, database-free testing is the only way to mutation-test this at
+// all.
+func nameUnderlyingTableError(err error, tableProofs []tableProof) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, oracle.ErrA1) && !errors.Is(err, oracle.ErrA4) {
+		return err
+	}
+	for _, tp := range tableProofs {
+		if errors.Is(err, oracle.ErrA1) && tp.A1Err != nil {
+			return fmt.Errorf("%w: %s: %v", err, tp.Table, tp.A1Err)
+		}
+		if errors.Is(err, oracle.ErrA4) && tp.A4Err != nil {
+			return fmt.Errorf("%w: %s: %v", err, tp.Table, tp.A4Err)
+		}
+	}
+	return err
 }
 
 // errNoScopedRelations reports that a policy file was read successfully but

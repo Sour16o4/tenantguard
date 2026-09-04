@@ -444,11 +444,13 @@ func TestAuditCLI_StructuralOnlyTableNeverProducesSafeOrLeak(t *testing.T) {
 
 // TestAuditCLI_UnattributableRateByDenominator is TGD-BL-33/TGD-BL-06's
 // baselining prerequisite exercised end-to-end: one query lands in each of
-// the four Population buckets (plus four SAFE and one LEAK, all on the
+// the four Population buckets (plus 50 SAFE and one LEAK, all on the
 // row-level table, so the "touching a declared table" denominators have a
 // non-trivial attributed count too — and the row_level_touching_real_app_sql
-// rate, 1/6 ≈ 0.1667, stays under the baselined ceiling (122/378 ≈ 0.32275,
-// TGD-BL-42), so this test exercises a clean exit-0 report rather than the
+// rate, 1/52 ≈ 0.0192, stays under the baselined ceiling (18/762 ≈ 0.0236,
+// TGD-BL-35 fix, SRS §7.18/§7.19 — 50 SAFE events, not 4, specifically
+// because the ceiling ratcheted down here and 1/6 ≈ 0.1667 no longer
+// clears it), so this test exercises a clean exit-0 report rather than the
 // ceiling itself, which
 // TestAuditCLI_UnattributableCeilingFailsAboveIt/PassesAtOrBelowIt cover
 // directly), and the report's own UnattributableRateByDenominator must
@@ -480,35 +482,40 @@ func TestAuditCLI_UnattributableRateByDenominator(t *testing.T) {
 		schema.Relation{Schema: "public", Name: "projects", Kind: "BASE TABLE", Class: schema.Scoped, TenantColumn: "id"},
 	)
 
+	const numSafe = 50          // enough that 1 unattributed row-level query stays under the 18/762 ceiling (TGD-BL-35 fix, SRS §7.18/§7.19).
 	safeEvent := capture.Event{ // SAFE: correctly scoped on the row-level table.
 		Kind: capture.KindBind, Resolved: true,
 		SQL:    "SELECT * FROM invoices WHERE tenant_id = $1",
 		Params: []capture.Param{{Known: true, Text: oracle.CanaryA}},
 	}
-	events := writeEventsFile(t, []capture.Event{
-		safeEvent, safeEvent, safeEvent, safeEvent,
-		{ // LEAK: no predicate at all, on the row-level table.
+	eventList := make([]capture.Event, 0, numSafe+5)
+	for i := 0; i < numSafe; i++ {
+		eventList = append(eventList, safeEvent)
+	}
+	eventList = append(eventList,
+		capture.Event{ // LEAK: no predicate at all, on the row-level table.
 			Kind: capture.KindQuery, Resolved: true,
 			SQL: "SELECT * FROM invoices",
 		},
-		{ // no_declared_table: touches nothing declared.
+		capture.Event{ // no_declared_table: touches nothing declared.
 			Kind: capture.KindQuery, Resolved: true,
 			SQL: "SELECT now()",
 		},
-		{ // structural_only: touches only the unseedable table.
+		capture.Event{ // structural_only: touches only the unseedable table.
 			Kind: capture.KindQuery, Resolved: true,
 			SQL: "SELECT * FROM projects WHERE org_id = 'acme'",
 		},
-		{ // non_query: cursor-protocol/session bookkeeping.
+		capture.Event{ // non_query: cursor-protocol/session bookkeeping.
 			Kind: capture.KindQuery, Resolved: true,
 			SQL: "BEGIN READ WRITE",
 		},
-		{ // row_level_unattributed: touches the row-level table, but the
+		capture.Event{ // row_level_unattributed: touches the row-level table, but the
 			// tenant is subquery-computed — a genuine attribution failure.
 			Kind: capture.KindQuery, Resolved: true,
 			SQL: "SELECT * FROM invoices WHERE tenant_id = (SELECT 'x')",
 		},
-	})
+	)
+	events := writeEventsFile(t, eventList)
 
 	r := runCLIBinary(t, bin, "audit", "--dsn", target, "--policy", policy, "--events", events)
 	if r.exitCode != 0 {
@@ -518,12 +525,18 @@ func TestAuditCLI_UnattributableRateByDenominator(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.stdout), &rep); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, r.stdout)
 	}
-	if len(rep.Queries) != 9 {
-		t.Fatalf("got %d query verdicts, want 9: %+v", len(rep.Queries), rep.Queries)
+	if len(rep.Queries) != numSafe+5 {
+		t.Fatalf("got %d query verdicts, want %d: %+v", len(rep.Queries), numSafe+5, rep.Queries)
 	}
 
-	wantVerdicts := []string{"SAFE", "SAFE", "SAFE", "SAFE", "LEAK", "UNATTRIBUTABLE", "UNATTRIBUTABLE", "UNATTRIBUTABLE", "UNATTRIBUTABLE"}
-	wantPopulations := []string{"", "", "", "", "", "no_declared_table", "structural_only", "non_query", "row_level_unattributed"}
+	wantVerdicts := make([]string, 0, numSafe+5)
+	wantPopulations := make([]string, 0, numSafe+5)
+	for i := 0; i < numSafe; i++ {
+		wantVerdicts = append(wantVerdicts, "SAFE")
+		wantPopulations = append(wantPopulations, "")
+	}
+	wantVerdicts = append(wantVerdicts, "LEAK", "UNATTRIBUTABLE", "UNATTRIBUTABLE", "UNATTRIBUTABLE", "UNATTRIBUTABLE")
+	wantPopulations = append(wantPopulations, "", "no_declared_table", "structural_only", "non_query", "row_level_unattributed")
 	for i := range rep.Queries {
 		if rep.Queries[i].Verdict != wantVerdicts[i] {
 			t.Errorf("query %d: verdict = %s, want %s (sql=%q reason=%q)",
@@ -552,10 +565,10 @@ func TestAuditCLI_UnattributableRateByDenominator(t *testing.T) {
 		byLabel[e.Label] = e
 	}
 	wantEntries := map[string]unattributableRateEntry{
-		"all_captured_queries":                     {Denominator: 9, Unattributable: 4},
-		"real_app_sql_any_table":                   {Denominator: 8, Unattributable: 3},
-		"real_app_sql_touching_any_declared_table": {Denominator: 7, Unattributable: 2},
-		"row_level_touching_real_app_sql":          {Denominator: 6, Unattributable: 1},
+		"all_captured_queries":                     {Denominator: numSafe + 5, Unattributable: 4},
+		"real_app_sql_any_table":                   {Denominator: numSafe + 4, Unattributable: 3},
+		"real_app_sql_touching_any_declared_table": {Denominator: numSafe + 3, Unattributable: 2},
+		"row_level_touching_real_app_sql":          {Denominator: numSafe + 2, Unattributable: 1},
 	}
 	if len(byLabel) != len(wantEntries) {
 		t.Fatalf("got %d denominator entries, want %d: %+v", len(byLabel), len(wantEntries), rep.UnattributableRateByDenominator)
@@ -582,7 +595,8 @@ func TestAuditCLI_UnattributableRateByDenominator(t *testing.T) {
 // TGD-BL-06's own proof the gate can fire, driven end-to-end through the
 // built binary: two row_level_unattributed queries against one SAFE one
 // (row_level_touching_real_app_sql rate 2/3 ≈ 0.667) is well above the
-// baselined ceiling (~0.213). The full report must still reach stdout
+// baselined ceiling (18/762 ≈ 0.0236, TGD-BL-35 fix, SRS §7.18/§7.19).
+// The full report must still reach stdout
 // (TGD-US-07 AC-1: a ceiling breach is a completed, proven run, not an
 // oracle self-check abort) — only the exit code and a distinct stderr
 // message change.
@@ -622,33 +636,38 @@ func TestAuditCLI_UnattributableCeilingFailsAboveIt(t *testing.T) {
 
 // TestAuditCLI_UnattributableCeilingPassesAtOrBelowIt is the companion proof
 // that the gate does not fire on a healthy rate: one row_level_unattributed
-// query against five SAFE ones (rate 1/6 ≈ 0.1667) sits under the baselined
-// ceiling (122/378 ≈ 0.32275, TGD-BL-42).
+// query against 50 SAFE ones (rate 1/51 ≈ 0.0196) sits under the baselined
+// ceiling (18/762 ≈ 0.0236, TGD-BL-35 fix, SRS §7.18/§7.19). 50, not 5, is
+// deliberate: the previous baseline (122/378 ≈ 0.32275) tolerated 1/6 ≈
+// 0.1667, but this lower, tool-improvement-driven ceiling does not.
 func TestAuditCLI_UnattributableCeilingPassesAtOrBelowIt(t *testing.T) {
 	admin := adminDSN(t)
 	bin := buildBinary(t)
 	target := setupTargetDatabase(t, admin, "tgd_cli_ceiling_pass")
 	policy := invoicesScoped(t)
 
+	const numSafe = 50
 	safeEvent := capture.Event{Kind: capture.KindBind, Resolved: true,
 		SQL:    "SELECT * FROM invoices WHERE tenant_id = $1",
 		Params: []capture.Param{{Known: true, Text: oracle.CanaryA}}}
-	events := writeEventsFile(t, []capture.Event{
-		safeEvent, safeEvent, safeEvent, safeEvent, safeEvent,
-		{Kind: capture.KindQuery, Resolved: true,
-			SQL: "SELECT * FROM invoices WHERE tenant_id = (SELECT 'x')"},
-	})
+	eventList := make([]capture.Event, 0, numSafe+1)
+	for i := 0; i < numSafe; i++ {
+		eventList = append(eventList, safeEvent)
+	}
+	eventList = append(eventList, capture.Event{Kind: capture.KindQuery, Resolved: true,
+		SQL: "SELECT * FROM invoices WHERE tenant_id = (SELECT 'x')"})
+	events := writeEventsFile(t, eventList)
 
 	r := runCLIBinary(t, bin, "audit", "--dsn", target, "--policy", policy, "--events", events)
 	if r.exitCode != 0 {
-		t.Fatalf("exit code = %d, want 0 — 1/6 is under the baselined ceiling. stderr:\n%s", r.exitCode, r.stderr)
+		t.Fatalf("exit code = %d, want 0 — 1/%d is under the baselined ceiling. stderr:\n%s", r.exitCode, numSafe+1, r.stderr)
 	}
 	var rep verifyReport
 	if err := json.Unmarshal([]byte(r.stdout), &rep); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v\nstdout: %s", err, r.stdout)
 	}
-	if len(rep.Queries) != 6 {
-		t.Fatalf("report.Queries has %d entries, want 6", len(rep.Queries))
+	if len(rep.Queries) != numSafe+1 {
+		t.Fatalf("report.Queries has %d entries, want %d", len(rep.Queries), numSafe+1)
 	}
 }
 
@@ -685,7 +704,7 @@ func TestAuditCLI_VacuousSafeExcludedFromAttributedDenominator(t *testing.T) {
 		},
 	})
 
-	// The corrected rate (1/2 = 0.5) exceeds the baselined ceiling (~0.32275, TGD-BL-42)
+	// The corrected rate (1/2 = 0.5) exceeds the baselined ceiling (18/762 ≈ 0.0236, TGD-BL-35 fix)
 	// — a real, useful confirmation this scenario's numbers are what they
 	// claim: the report is still fully written (TGD-US-07 AC-1), only the
 	// exit code changes.

@@ -12,10 +12,11 @@ import (
 // []unattributableRateEntry a report carries.
 
 func TestCheckUnattributableCeiling_AboveFails(t *testing.T) {
-	// 0.90 is deliberately far above any plausible baseline (TGD-BL-42
-	// raised the ceiling to ≈0.32275) rather than a fixed value close to a
-	// specific historical baseline, so this test does not need updating
-	// every time the baseline itself is legitimately re-measured.
+	// 0.90 is deliberately far above any plausible baseline (currently
+	// 18/762 ≈ 0.0236, TGD-BL-35 fix, SRS §7.18/§7.19) rather than a fixed
+	// value close to a specific historical baseline, so this test does not
+	// need updating every time the baseline itself is legitimately
+	// re-measured.
 	err := checkUnattributableCeiling([]unattributableRateEntry{
 		{Label: unattributableCeilingDenominator, Denominator: 100, Unattributable: 90, Rate: 0.90},
 	})
@@ -35,10 +36,10 @@ func TestCheckUnattributableCeiling_AtOrBelowPasses(t *testing.T) {
 
 	// Below the ceiling.
 	err = checkUnattributableCeiling([]unattributableRateEntry{
-		{Label: unattributableCeilingDenominator, Denominator: 100, Unattributable: 10, Rate: 0.10},
+		{Label: unattributableCeilingDenominator, Denominator: 1000, Unattributable: 10, Rate: 0.01},
 	})
 	if err != nil {
-		t.Errorf("got %v, want nil — 0.10 is below the baselined ceiling", err)
+		t.Errorf("got %v, want nil — 0.01 is below the baselined ceiling", err)
 	}
 }
 
@@ -69,10 +70,10 @@ func TestCheckUnattributableCeiling_MessageNamesRateAndDenominator(t *testing.T)
 func TestCheckUnattributableCeiling_OtherDenominatorsIgnored(t *testing.T) {
 	err := checkUnattributableCeiling([]unattributableRateEntry{
 		{Label: "all_captured_queries", Denominator: 100, Unattributable: 99, Rate: 0.99},
-		{Label: unattributableCeilingDenominator, Denominator: 100, Unattributable: 5, Rate: 0.05},
+		{Label: unattributableCeilingDenominator, Denominator: 1000, Unattributable: 5, Rate: 0.005},
 	})
 	if err != nil {
-		t.Errorf("got %v, want nil — the baselined denominator's own rate (0.05) is well under the ceiling", err)
+		t.Errorf("got %v, want nil — the baselined denominator's own rate (0.005) is well under the ceiling", err)
 	}
 }
 

@@ -82,13 +82,41 @@ func TestPartitionedTableIsScoped(t *testing.T) {
 
 func TestAllCandidateColumnNames(t *testing.T) {
 	for _, c := range []string{"tenant_id", "org_id", "organization_id",
-		"workspace_id", "account_id", "owner"} {
+		"workspace_id", "account_id", "owner", "instance_id"} {
 		if cls, col, _, _ := Classify("BASE TABLE", []string{"id", c}); cls != Scoped || col != c {
 			t.Errorf("column %q not recognised as a tenant candidate", c)
 		}
 	}
 	if cls, _, _, _ := Classify("BASE TABLE", []string{"id", "ownership"}); cls != Unscoped {
 		t.Errorf("%q should not match the %q candidate", "ownership", "owner")
+	}
+}
+
+// TestClassify_ZitadelInstanceIDIsCandidate is TGD-BL-07's exact fixture
+// shape: zitadel's real projections.users14 table
+// (id, instance_id, resource_owner, username, creation_date). Found by
+// running `infer` against a live Postgres table shaped exactly like this
+// one (SRS §7.14) — before this fix, both columns were invisible to
+// Classify and the table came back Unscoped: a real, hard-partitioned
+// table silently exempted from RLS synthesis, A1/A4 proof, and Tier 2
+// scoping, not a crash — the worst failure shape this tool has.
+// resource_owner is deliberately NOT added as a candidate (SRS §7.13): it
+// is app-computed visibility (PermissionClause-joined, spanning multiple
+// orgs a caller may be granted into), the same shape that disqualified
+// gitea/mattermost, not a database-enforceable per-tenant partition the
+// way instance_id is.
+func TestClassify_ZitadelInstanceIDIsCandidate(t *testing.T) {
+	cls, col, cands, _ := Classify("BASE TABLE",
+		[]string{"id", "instance_id", "resource_owner", "username", "creation_date"})
+	if cls != Scoped {
+		t.Fatalf("class = %q, want %q — instance_id must be recognised as the sole candidate", cls, Scoped)
+	}
+	if col != "instance_id" {
+		t.Errorf("tenant column = %q, want instance_id", col)
+	}
+	if len(cands) != 1 || cands[0] != "instance_id" {
+		t.Errorf("candidates = %v, want exactly [instance_id] — "+
+			"resource_owner must NOT be treated as a second candidate", cands)
 	}
 }
 

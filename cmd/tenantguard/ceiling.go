@@ -94,7 +94,49 @@ const unattributableCeilingDenominator = "row_level_touching_real_app_sql"
 // suite, not a general claim about the tool's attribution quality — see
 // TGD-NFR-03's SRS row for what would justify revising it (a second
 // target's own measurement, not a bad run against coder).
-const unattributableCeilingRate = 122.0 / 378.0
+//
+// **Fourth baseline: TGD-BL-35's fix LOWERS it to 18.0/762.0 (≈0.023622,
+// 9/381 simplified), 2026-09-04 (SRS §7.18/§7.19).** Unlike every prior
+// move on this constant, this one is driven by neither a measurement
+// correction (TGD-BL-38: broadened row-level coverage changed what the
+// denominator counted) nor a defect fix in extraction/attribution logic
+// that had been silently corrupting the numerator (TGD-BL-42: the
+// cast-handling bug above) — it is the first ratchet driven by a real
+// capability improvement in what Tier 1 can actually resolve. TGD-BL-35's
+// fix (surgical delete-and-retry of a colliding row inside the existing
+// rolled-back transaction, internal/differ/differ.go) lets the differ
+// correctly attribute a class of write re-execution the tool previously
+// could only report UNATTRIBUTABLE for at all — the ceiling falling
+// reflects the tool doing more, not a different population being counted
+// or a bug being removed from how it counted the same thing. Measured on
+// a fresh coder/coder capture (coderd/database/dbpurge run through the
+// proxy a third time this project's life, against a freshly migrated,
+// C-7-shared coder_target — the same caveat every coder baseline before
+// this one has carried): safe=515, leak=446, unattributable=4108 (of 5069
+// total). row_level_touching_real_app_sql: 18/762 UNATTRIBUTABLE =
+// 0.023622. infer/verify against this capture matched the historical
+// baseline exactly (132/22/95/15 candidates, 13/22 row-level proven),
+// confirming this is a like-for-like re-measurement of the same traffic
+// shape, not a differently-composed sample the way TGD-BL-42's 378 vs.
+// 664 was. This lower number satisfies the ratchet rule outright (TGD-US-07
+// AC-2: only ever lowered, no exception needed) — it is recorded here
+// alongside the raise-case history above only so a reader sees all four
+// moves and why each one happened for a different reason, not so this one
+// needs the same justification the raise did.
+//
+// **A second, independent real-target measurement exists for the same
+// fix and deliberately does NOT set this ceiling: zitadel's own re-run
+// measured row_level_touching_real_app_sql at 17.19% (204/1187) —
+// clears the OLD ceiling (32.28%) but BREACHES this new one (2.36%).**
+// This is expected, not a regression to chase: zitadel's capture is
+// start-from-init's bootstrap/migration sequence (SRS §7.16), not the
+// steady-state application traffic this ceiling has always been
+// calibrated against, and this ceiling remains coder-specific by design
+// (the comment above this one already says so). Recorded here in advance
+// so a future zitadel run breaching 2.36% is read correctly on sight —
+// as the expected consequence of comparing a bootstrap-heavy capture to a
+// steady-state-calibrated ceiling, not as evidence the fix regressed.
+const unattributableCeilingRate = 18.0 / 762.0
 
 // ErrUnattributableCeilingExceeded reports that the measured rate against
 // unattributableCeilingDenominator exceeded unattributableCeilingRate.

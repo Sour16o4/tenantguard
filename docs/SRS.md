@@ -3502,6 +3502,69 @@ finding as a real, disclosable one — the manual version of the
 provenance work `TGD-BL-26` would have automated, still possible by
 hand, just not done in this session.
 
+### 7.22 `TGD-BL-48`: `TestVerifyCLI_ProbeDatabaseIsAlwaysDropped` flaked
+under `-race` from a test-isolation gap, not a product defect — fixed
+
+**[E] The failure.** `go test ./... -race` and
+`go test ./cmd/tenantguard ./internal/oracle -race -count=1` intermittently
+failed `TestVerifyCLI_ProbeDatabaseIsAlwaysDropped`
+(`cmd/tenantguard/main_test.go`) with `probe database count changed 0 -> 1;
+a probe leaked on one of the two runs`. `go test ./cmd/tenantguard -race
+-count=5` and any `-run`-filtered invocation always passed. Reproduced
+directly, not inferred from the report: reverting the test's own query
+predicate back to its original form and running
+`go test ./cmd/tenantguard ./internal/oracle -race -count=1` failed on the
+first attempt with the identical message and line; restoring the fix and
+re-running the identical command passed, then passed again on three further
+unfiltered runs of the same two-package combination.
+
+**[E] Root cause, inspected directly.** The test's own `countProbes` helper
+queried `pg_database` with `datname LIKE 'tgd_probe_%'` — a cluster-wide
+predicate with no connection to which process created the row. The CLI
+names its own probes `tgd_probe_<nanosecond-timestamp>`, all digits
+(`cmd/tenantguard/oracle_gate.go`, `fmt.Sprintf("tgd_probe_%d",
+time.Now().UnixNano())`). `internal/oracle`'s own test fixtures create
+their own, differently-shaped `tgd_probe_<word>` databases (e.g.
+`tgd_probe_dropcheck`, `tgd_probe_verify_ok` — `oracle_integration_test.go`,
+`canary_type_test.go`) against the **same** PostgreSQL cluster, as a
+**separate test binary** with its own lifecycle. `cmd/tenantguard`'s own
+tests never call `t.Parallel()`, so no two CLI tests overlap this one —
+the interleaving is between the two separately-compiled test binaries `go
+test` runs concurrently when given both package paths, not within either
+one. When an `internal/oracle` fixture's probe existed at the instant this
+test sampled `pg_database` (before that fixture's own cleanup ran, or
+because two fixtures were briefly both live), the wide `LIKE` pattern
+counted it as if it belonged to the CLI under test, and the assertion — a
+before/after equality check — failed on a count that had nothing to do
+with the CLI's own behaviour. **After a full run completes, no
+`tgd_probe_*` database survives in either scheme** — confirmed directly by
+querying `pg_database`, not assumed. No probe leak exists, and `§3.3`
+(no writes to the target's own database, only to disposable probes this
+tool creates and drops) is not implicated: the disposable probes on both
+sides of this test's confusion were being dropped correctly by their own
+owning process the whole time.
+
+**Fixed:** `countProbes`'s predicate narrowed to `datname ~
+'^tgd_probe_[0-9]+$'` — a regex anchored to the CLI's own, all-digits
+naming scheme, which no `internal/oracle` fixture name can ever match
+(every one is a Go identifier-shaped word, never purely numeric). The
+assertion itself is unchanged: it still fails if the CLI's own probe count
+changes across the two `verify` runs it drives. A comment above the
+function names the reason the pattern must stay this narrow, so a future
+widening does not silently reintroduce the same nondeterministic failure.
+
+**Not a new product defect, and not introduced by the `fix/stale-help-text`
+PR.** The naming collision between the CLI's and `internal/oracle`'s test
+probes has existed since both were written; the PR that first exposed this
+failure changed only `--help` text and an unrelated Go doc comment, touching
+neither `main_test.go` nor any probe-naming logic — it surfaced a latent
+test-isolation gap by scheduling luck (which package's tests happened to
+interleave with which), it did not create one. Filed and fixed in the same
+session per the same discipline every other defect in this document
+follows: found by running the suite, root-caused by direct inspection
+before writing a fix, and proven red-before-green rather than asserted
+fixed by inspection alone.
+
 ## 8. External Interfaces
 
 ### 8.1 Commands

@@ -107,9 +107,15 @@ audit: runs the identical gate over every scoped table in --policy. If not
   disposable probe database, never --dsn's own data — TGD-US-10 AC-3). When
   --events produced at least one verdict, the report also carries "counts"
   (SAFE/LEAK/UNATTRIBUTABLE, summing to the number of verdicts — TGD-US-05
-  AC-3 / TGD-US-10 AC-3) and "unattributable_rate" — reported for information
-  only in this build; the 5% ceiling (TGD-NFR-03) is not yet baselined
-  (TGD-BL-06) and does not fail the run (TGD-US-07 AC-3).
+  AC-3 / TGD-US-10 AC-3), "unattributable_rate", and
+  "unattributable_rate_by_denominator" (the same rate against four
+  candidate denominators — all_captured_queries, real_app_sql_any_table,
+  real_app_sql_touching_any_declared_table, row_level_touching_real_app_sql).
+  TGD-NFR-03's ceiling IS baselined (currently 18.0/762.0, ≈2.36%) and DOES
+  fail the run: if row_level_touching_real_app_sql's own rate exceeds it,
+  the full report still reaches stdout — a breach is a completed, proven
+  run, not an aborted self-check — but the process exits 3, with a stderr
+  line naming the denominator, the measured rate, and the ceiling.
 
   Known gap (TGD-BL-26): a LEAK verdict names the SQL, parameters and table,
   but not the test or application code path that issued it — capture has no
@@ -367,11 +373,15 @@ type verifyReport struct {
 	// TestAuditCLI_CountsSumToQueryTotal, not just implied by the list.
 	Counts *verdictCounts `json:"counts,omitempty"`
 	// UnattributableRate is TGD-US-07's reported rate — set only when audit
-	// actually ran the differ over at least one query. Per AC-3, TGD-NFR-03's
-	// 5% figure is marked [U] ("advisory until TGD-BL-06", an M3 milestone
-	// item not yet reached): this build reports the true rate and never
-	// fails a run because of it. A nil pointer (omitted key) distinguishes
-	// "no queries were audited" from a genuine, reportable 0%.
+	// actually ran the differ over at least one query: the same
+	// all_captured_queries figure UnattributableRateByDenominator's own
+	// first entry carries, kept as its own top-level field for a reader who
+	// wants the simple number without the four-way breakdown. TGD-NFR-03's
+	// ceiling is baselined (currently 18.0/762.0, TGD-BL-35/TGD-BL-47) and
+	// enforced against row_level_touching_real_app_sql specifically, not
+	// against this field — see checkUnattributableCeiling. A nil pointer
+	// (omitted key) distinguishes "no queries were audited" from a genuine,
+	// reportable 0%.
 	UnattributableRate *float64 `json:"unattributable_rate,omitempty"`
 	// UnattributableRateByDenominator is TGD-BL-33/TGD-BL-06's baselining
 	// prerequisite: the same rate computed against four candidate

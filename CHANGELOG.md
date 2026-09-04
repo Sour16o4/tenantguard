@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.1]
+
+### Fixed
+
+- `tenantguard`'s own `--help` text still described `TGD-NFR-03`'s ceiling
+  as unbaselined and non-enforcing (`"the 5% ceiling ... is not yet
+  baselined ... and does not fail the run"`) — stale since `v1.0.0` itself
+  shipped the ceiling baselined at `18.0/762.0` (≈2.36%) and enforced (exit
+  3 on breach). Corrected to describe what the binary actually does,
+  including the previously-unmentioned `unattributable_rate_by_denominator`
+  field and the exit-3 breach path. A matching stale doc comment on
+  `verifyReport.UnattributableRate` (same underlying claim, in source
+  rather than `--help`) was fixed in the same pass. The `TGD-BL-26` note
+  in `--help` was checked, not assumed, and found still accurate — that
+  gap was formally withdrawn from `v1.0.0`, not closed, so the binary's
+  actual behavior (no code-path provenance) is unchanged and the text
+  describing it needed no fix. `README.md` and this file were checked
+  against the corrected text and already agreed with it — no changes
+  needed there.
+
 ## [1.0.0]
 
 A single entry, not a per-commit history. `§12`'s Definition of Done has

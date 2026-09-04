@@ -879,6 +879,21 @@ func TestVerifyCLI_ProbeDatabaseIsAlwaysDropped(t *testing.T) {
 		Class: schema.Scoped, TenantColumn: "id",
 	})
 
+	// The predicate is deliberately scoped to the CLI's own probe naming —
+	// tgd_probe_<nanosecond-timestamp>, all digits (oracle_gate.go's
+	// fmt.Sprintf("tgd_probe_%d", time.Now().UnixNano())) — via a regex
+	// anchored to digits-only, not the wider 'tgd_probe_%' LIKE pattern.
+	// internal/oracle's own tests create their own tgd_probe_<word> probes
+	// (e.g. tgd_probe_dropcheck, tgd_probe_verify_ok) against this same
+	// cluster, as a separate test binary with its own lifecycle this test
+	// has no visibility into and no business asserting anything about. A
+	// wider pattern here counts those probes too, so this assertion's
+	// before/after count depends on whatever unrelated internal/oracle test
+	// happens to be mid-run (or briefly failed to clean up) on the shared
+	// cluster at the moment this test samples it — a real, observed
+	// nondeterministic failure ("count changed 0 -> 1") that looked like a
+	// CLI probe leak but was not one. Widening this pattern again would
+	// reintroduce exactly that failure mode.
 	countProbes := func() int {
 		db, err := sql.Open("postgres", admin)
 		if err != nil {
@@ -887,7 +902,7 @@ func TestVerifyCLI_ProbeDatabaseIsAlwaysDropped(t *testing.T) {
 		defer db.Close()
 		var n int
 		if err := db.QueryRow(
-			"SELECT count(*) FROM pg_database WHERE datname LIKE 'tgd_probe_%'").Scan(&n); err != nil {
+			"SELECT count(*) FROM pg_database WHERE datname ~ '^tgd_probe_[0-9]+$'").Scan(&n); err != nil {
 			t.Fatalf("count probes: %v", err)
 		}
 		return n
